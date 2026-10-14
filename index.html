@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>おもいで付箋ボード</title>
+<meta name="description" content="Googleドライブの写真をAIがテーマごとに付箋へまとめる、思い出のホワイトボード">
+<meta name="theme-color" content="#E9EDF1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Klee+One:wght@400;600&family=Shippori+Mincho:wght@500;700&family=Zen+Maru+Gothic:wght@500;700&display=swap">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ===================== 認証 ===================== -->
+<main id="auth" class="auth" hidden>
+  <div class="auth-intro">
+    <h1 class="wordmark">おもいで付箋ボード</h1>
+    <p>ドライブの写真をAIが読み取り、「海に行った日」「美味しいご飯」のようなテーマごとに付箋へまとめます。</p>
+  </div>
+
+  <section class="sticky auth-card" data-panel="login" hidden>
+    <h2>ログイン</h2>
+    <form data-form="login" novalidate>
+      <label class="field"><span>メールアドレス</span>
+        <input type="email" name="email" autocomplete="email" required></label>
+      <label class="field"><span>パスワード</span>
+        <span class="pw"><input type="password" name="password" autocomplete="current-password" required><button type="button" class="eye" aria-label="パスワードを表示" aria-pressed="false"></button></span></label>
+      <button class="btn primary wide" type="submit">ログイン</button>
+    </form>
+    <p class="links">
+      <button type="button" class="link" data-go="register">新規登録</button>
+      <button type="button" class="link" data-go="forgot">パスワードを忘れた</button>
+    </p>
+  </section>
+
+  <section class="sticky auth-card" data-panel="register" style="--c:#A9E3F2" hidden>
+    <h2>新規登録</h2>
+    <p class="note-text">メールアドレスに仮パスワードを送ります。</p>
+    <form data-form="register" novalidate>
+      <label class="field"><span>メールアドレス</span>
+        <input type="email" name="email" autocomplete="email" required></label>
+      <label class="field"><span>ニックネーム</span>
+        <input type="text" name="nickname" maxlength="30" autocomplete="nickname" required></label>
+      <button class="btn primary wide" type="submit">仮パスワードを発行</button>
+    </form>
+    <p class="links"><button type="button" class="link" data-go="login">ログインに戻る</button></p>
+  </section>
+
+  <section class="sticky auth-card" data-panel="registered" style="--c:#CBEB98" hidden>
+    <h2>登録しました</h2>
+    <p id="reg-msg" class="note-text"></p>
+    <div id="reg-temp" class="temp-box" hidden>
+      <span>仮パスワード</span>
+      <code id="reg-temp-value"></code>
+      <button type="button" class="link" id="reg-copy">コピー</button>
+    </div>
+    <button type="button" class="btn primary wide" data-go="login">ログインへ進む</button>
+  </section>
+
+  <section class="sticky auth-card" data-panel="forgot" style="--c:#FFB8D2" hidden>
+    <h2>パスワードの再発行</h2>
+    <p class="note-text">登録したメールアドレスに、新しい仮パスワードを送ります。</p>
+    <form data-form="forgot" novalidate>
+      <label class="field"><span>メールアドレス</span>
+        <input type="email" name="email" autocomplete="email" required></label>
+      <button class="btn primary wide" type="submit">仮パスワードを再発行</button>
+    </form>
+    <p class="links"><button type="button" class="link" data-go="login">ログインに戻る</button></p>
+  </section>
+
+  <section class="sticky auth-card" data-panel="change" style="--c:#FFC98A" hidden>
+    <h2>パスワードを設定</h2>
+    <p class="note-text">仮パスワードから、ご自身のパスワードに変更してください。8文字以上で、英字と数字を両方含めます。</p>
+    <form data-form="change" novalidate>
+      <label class="field"><span>仮パスワード（現在のパスワード）</span>
+        <span class="pw"><input type="password" name="currentPassword" autocomplete="current-password" required><button type="button" class="eye" aria-label="パスワードを表示" aria-pressed="false"></button></span></label>
+      <label class="field"><span>新しいパスワード</span>
+        <span class="pw"><input type="password" name="newPassword" autocomplete="new-password" minlength="8" required><button type="button" class="eye" aria-label="パスワードを表示" aria-pressed="false"></button></span></label>
+      <label class="field"><span>新しいパスワード（確認）</span>
+        <span class="pw"><input type="password" name="confirmPassword" autocomplete="new-password" minlength="8" required><button type="button" class="eye" aria-label="パスワードを表示" aria-pressed="false"></button></span></label>
+      <button class="btn primary wide" type="submit">パスワードを変更</button>
+    </form>
+    <p class="links"><button type="button" class="link" data-action="logout">ログアウト</button></p>
+  </section>
+
+  <footer class="auth-foot">
+    <button type="button" class="link" data-open-settings>接続設定</button>
+    <span class="version">v<span class="ver"></span></span>
+  </footer>
+</main>
+
+<!-- ===================== メイン ===================== -->
+<div id="app" class="app" hidden>
+  <header class="topbar">
+    <h1 class="wordmark small">おもいで付箋ボード</h1>
+    <nav class="tools" aria-label="ボードの操作">
+      <button class="btn primary" id="btn-new">テーマを作る</button>
+      <button class="btn" id="btn-suggest"><span class="lg">AIにテーマを提案してもらう</span><span class="sm">AI提案</span></button>
+      <button class="btn" id="btn-photos">写真 <span class="pill" id="photo-count">0</span></button>
+      <button class="icon-btn" id="btn-settings" aria-label="設定" data-open-settings>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+      </button>
+    </nav>
+  </header>
+
+  <div id="viewport" class="viewport" tabindex="0" aria-label="ホワイトボード">
+    <div id="board" class="board"></div>
+  </div>
+
+  <div id="board-empty" class="board-empty" hidden>
+    <div class="sticky hint" style="--c:#A9E3F2">
+      <h2>はじめかた</h2>
+      <ol>
+        <li>「写真」で、フォルダを読み込むか写真を追加します。</li>
+        <li>「AIで解析する」で、写真の内容をAIが読み取ります。</li>
+        <li>「テーマを作る」か「AI提案」で、付箋をボードに貼ります。</li>
+      </ol>
+      <button class="btn primary" data-open-drawer>写真を用意する</button>
+    </div>
+  </div>
+
+  <div class="zoom" role="group" aria-label="表示の拡大縮小">
+    <button class="icon-btn" data-zoom="in" aria-label="拡大">＋</button>
+    <button class="icon-btn" data-zoom="out" aria-label="縮小">−</button>
+    <button class="btn small" data-zoom="fit">全体を表示</button>
+  </div>
+  <p class="version-tag">v<span class="ver"></span></p>
+</div>
+
+<!-- ===================== 写真ドロワー ===================== -->
+<aside id="drawer" class="drawer" aria-label="写真の管理" aria-hidden="true">
+  <header class="drawer-head">
+    <h2>写真</h2>
+    <button class="icon-btn" data-close-drawer aria-label="閉じる">✕</button>
+  </header>
+  <section class="folder-box">
+    <p class="muted">読み込むフォルダ</p>
+    <p class="folder-name"><a id="folder-link" target="_blank" rel="noopener">—</a></p>
+    <form id="folder-form" class="row">
+      <input name="folder" placeholder="GoogleドライブのフォルダURLまたはID" autocomplete="off">
+      <button class="btn small" type="submit">変更</button>
+    </form>
+    <button type="button" class="link" id="folder-home">最初のフォルダ（アップロード先）に戻す</button>
+  </section>
+  <div class="drawer-actions">
+    <button class="btn" id="btn-scan">フォルダを読み込む</button>
+    <label class="btn file-btn">写真を追加<input type="file" id="file-input" accept="image/*" multiple hidden></label>
+    <button class="btn primary" id="btn-analyze">AIで解析する</button>
+  </div>
+  <div id="progress" class="progress" hidden>
+    <div class="bar"><i></i></div>
+    <p></p>
+    <button type="button" class="link" id="btn-stop">止める</button>
+  </div>
+  <p id="photo-stats" class="muted stats"></p>
+  <div id="photo-grid" class="photo-grid"></div>
+</aside>
+
+<!-- ===================== 付箋メニュー ===================== -->
+<div id="note-menu" class="menu" role="menu" hidden>
+  <button role="menuitem" data-act="open">開く</button>
+  <button role="menuitem" data-act="edit">名前と色を変える</button>
+  <button role="menuitem" data-act="refresh">写真を探し直す</button>
+  <button role="menuitem" data-act="narration">ナレーションを作り直す</button>
+  <button role="menuitem" data-act="earth">撮影地と映像</button>
+  <button role="menuitem" data-act="delete" class="danger">付箋をはがす</button>
+</div>
+
+<!-- ===================== ダイアログ ===================== -->
+<dialog id="dlg-new" class="dlg">
+  <form>
+    <h2>テーマを作る</h2>
+    <label class="field"><span>テーマ</span>
+      <input name="title" maxlength="30" required placeholder="例：海に行った日"></label>
+    <div class="chips" id="preset-chips"></div>
+    <fieldset class="swatches"><legend>付箋の色</legend><div class="sw-list" data-swatches="new"></div></fieldset>
+    <p class="muted">解析済みの写真から、テーマに合うものをAIが選んで付箋にします。</p>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-close>やめる</button>
+      <button type="submit" class="btn primary">写真を探して貼る</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-edit" class="dlg">
+  <form>
+    <h2>名前と色を変える</h2>
+    <label class="field"><span>テーマ</span><input name="title" maxlength="30" required></label>
+    <fieldset class="swatches"><legend>付箋の色</legend><div class="sw-list" data-swatches="edit"></div></fieldset>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-close>やめる</button>
+      <button type="submit" class="btn primary">変更を保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-suggest" class="dlg wide">
+  <form>
+    <h2>AIが提案したテーマ</h2>
+    <p class="muted">貼りたいテーマにチェックを入れてください。名前はここで直せます。</p>
+    <ul id="suggest-list" class="suggest-list"></ul>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-close>やめる</button>
+      <button type="submit" class="btn primary">選んだテーマを貼る</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-earth" class="dlg wide">
+  <form>
+    <h2>撮影地と映像</h2>
+    <p class="muted">写真の位置情報から撮影地を並べています。Google Earth Studio でフライト映像を作るときは、この座標をカメラの目標地点に使ってください。</p>
+    <ul id="earth-list" class="earth-list"></ul>
+    <label class="field"><span>フライト映像のURL（走馬灯の最初に流れます）</span>
+      <input name="earthVideoUrl" type="text" placeholder="media/flight.mp4 または YouTube・GoogleドライブのURL"></label>
+    <p class="muted small">Earth Studio で書き出した MP4 は、GitHub リポジトリの media/ に置くと自動再生できます。YouTube は限定公開でも使えます。GoogleドライブのURLは再生ボタンを押す必要があります。</p>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-close>閉じる</button>
+      <button type="submit" class="btn primary">映像を保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-settings" class="dlg">
+  <form>
+    <h2>設定</h2>
+    <label class="field"><span>GAS ウェブアプリのURL</span>
+      <input name="gasUrl" type="url" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off"></label>
+    <p class="muted small">空にすると config.js の URL を使います。GASを新しくデプロイしたときはここを書き換えてください。</p>
+    <label class="field"><span>ナレーションの声</span><select name="voice"></select></label>
+    <div id="settings-account" class="account" hidden>
+      <p><strong id="acc-name"></strong><br><span class="muted" id="acc-email"></span></p>
+      <button type="button" class="btn small" data-action="logout">ログアウト</button>
+    </div>
+    <p class="muted small">おもいで付箋ボード v<span class="ver"></span>　<button type="button" class="link" id="btn-test">接続を確かめる</button></p>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-close>閉じる</button>
+      <button type="submit" class="btn primary">設定を保存</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ===================== ビューワー ===================== -->
+<div id="viewer" class="viewer" hidden>
+  <header class="viewer-bar">
+    <h2 id="v-title"></h2>
+    <div class="mode-tabs" role="tablist" aria-label="表示モード">
+      <button role="tab" data-mode="random">ランダム</button>
+      <button role="tab" data-mode="album">アルバム</button>
+      <button role="tab" data-mode="cinema">走馬灯</button>
+    </div>
+    <button class="icon-btn" id="v-close" aria-label="閉じる">✕</button>
+  </header>
+  <div class="viewer-body">
+    <div id="v-stage" class="v-stage"></div>
+    <aside id="v-side" class="v-side" aria-label="写真の情報とコメント"></aside>
+  </div>
+  <div id="v-controls" class="viewer-controls"></div>
+</div>
+
+<div id="busy" class="busy" hidden><div class="busy-card"><span class="spinner" aria-hidden="true"></span><p id="busy-msg"></p></div></div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
