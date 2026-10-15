@@ -1,12 +1,13 @@
 /**
  * おもいで付箋ボード (omoide-fusen) — Google Apps Script バックエンド
- * Version 1.0.0
+ * Version 1.0.2
  *
  * ── スクリプトプロパティ ──────────────────────────────
  *   GEMINI_API_KEY      (必須) Google AI Studio の API キー
  *   GEMINI_MODEL        (任意) 既定: gemini-2.5-flash
  *   TTS_MODEL           (任意) 既定: gemini-2.5-flash-preview-tts
  *   TTS_VOICE           (任意) 既定: Kore
+ *   GOOGLE_MAPS_SERVER_KEY (任意) Geocoding API 用サーバーキー。未設定なら GAS 組み込み Maps を使用
  *   APP_URL             (任意) GitHub Pages の URL（メール本文に記載）
  *   SHOW_TEMP_PASSWORD  (任意) 'true' で新規登録時に仮パスワードを画面にも表示（既定 false）
  *   SPREADSHEET_ID / ROOT_FOLDER_ID / PEPPER … setup() が自動作成
@@ -17,7 +18,7 @@
  *   ※ コードを変更したら「デプロイを管理 > 編集 > 新バージョン」で再デプロイ
  */
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.0.2';
 
 const DEF = {
   users:    { name: 'Users',    cols: ['email', 'nickname', 'passwordHash', 'salt', 'isFirstLogin', 'failCount', 'lockedUntil', 'folderId', 'homeFolderId', 'createdAt', 'lastLoginAt'] },
@@ -507,10 +508,38 @@ function imageBlob_(fileId, size, meta) {
   return f.getBlob();
 }
 
+/**
+ * 撮影地の逆ジオコーディング
+ * - スクリプトプロパティ GOOGLE_MAPS_SERVER_KEY があれば Geocoding API（キー課金枠）を使用
+ * - なければ GAS 組み込みの Maps サービス（キー不要・1日あたりの回数上限あり）
+ * - 同じ場所（小数3桁≒100m）の結果は6時間キャッシュ
+ */
 function reverseGeocode_(lat, lng) {
+  const cache = CacheService.getScriptCache();
+  const ck = 'geo:' + lat.toFixed(3) + ',' + lng.toFixed(3);
+  const hit = cache.get(ck);
+  if (hit !== null) return hit;
+  const place = reverseGeocodeRaw_(lat, lng);
+  if (place) cache.put(ck, place, 21600);
+  return place;
+}
+
+function reverseGeocodeRaw_(lat, lng) {
   try {
-    const r = Maps.newGeocoder().setLanguage('ja').reverseGeocode(lat, lng);
-    const res = r && r.results && r.results[0];
+    let res = null;
+    const key = prop_('GOOGLE_MAPS_SERVER_KEY', '');
+    if (key) {
+      const url = 'https://maps.googleapis.com/maps/api/geocode/json?language=ja&latlng=' +
+        lat + ',' + lng + '&key=' + encodeURIComponent(key);
+      const r = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+      const j = JSON.parse(r.getContentText() || '{}');
+      if (j.status === 'OK') res = j.results[0];
+      else if (j.status !== 'ZERO_RESULTS') console.warn('Geocoding API: ' + j.status + ' ' + (j.error_message || ''));
+    }
+    if (!res) {
+      const r2 = Maps.newGeocoder().setLanguage('ja').reverseGeocode(lat, lng);
+      res = r2 && r2.results && r2.results[0];
+    }
     if (!res) return '';
     const pick = type => {
       const c = res.address_components.find(a => a.types.indexOf(type) >= 0);
@@ -741,7 +770,7 @@ function tts_(req) {
   if (!text) throw err_('読み上げる文章がありません。');
   const voice = /^[A-Za-z]{2,20}$/.test(req.voice || '') ? req.voice : prop_('TTS_VOICE', 'Kore');
   const body = {
-    contents: [{ parts: [{ text: '懐かしい思い出を語りかけるように、ゆっくり穏やかに読み上げてください：\n' + text }] }],
+    contents: [{ parts: [{ text: text }] }],
     generationConfig: {
       responseModalities: ['AUDIO'],
       speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } },

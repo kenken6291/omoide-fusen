@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — app.js  v1.0.0 */
+/* おもいで付箋ボード — app.js  v1.0.1 */
 (() => {
   'use strict';
 
@@ -74,7 +74,10 @@
     t.textContent = msg; t.dataset.type = type; t.hidden = false;
     t.classList.remove('show'); void t.offsetWidth; t.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => t.classList.remove('show'), type === 'error' ? 6500 : 3800);
+    toastTimer = setTimeout(() => {
+      t.classList.remove('show');
+      toastTimer = setTimeout(() => { t.hidden = true; }, 300);
+    }, type === 'error' ? 6500 : 3800);
   }
   function busy(msg) {
     if (msg === false) { $('#busy').hidden = true; return; }
@@ -1236,6 +1239,8 @@
       if (!voiceOn) player.pause();
     });
     const restartBtn = ctrlBtn('最初から', () => setMode('cinema'));
+    pauseBtn.disabled = true;
+    restartBtn.disabled = true;
     controls.append(pauseBtn, voiceBtn, restartBtn);
     V.keys = e => { if (e.key === ' ') { e.preventDefault(); pauseBtn.click(); } };
     V.cleanup = () => {
@@ -1380,6 +1385,8 @@
     async function run() {
       running = true;
       startBox.hidden = true;
+      pauseBtn.disabled = false;
+      restartBtn.disabled = false;
       if (!t.narration || !Array.isArray(t.narration.lines)) {
         setSub('', 'ナレーションを用意しています…');
         try {
@@ -1420,6 +1427,7 @@
         startBox.querySelector('#c-play').textContent = 'もう一度再生する';
         startBox.hidden = false;
         running = false;
+        pauseBtn.disabled = true;
       } catch (e) {
         if (e !== STOP) toast(e.message || '再生を続けられませんでした。', 'error');
       }

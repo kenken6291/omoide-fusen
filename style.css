@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — style.css  v1.0.0 */
+/* おもいで付箋ボード — style.css  v1.0.1 */
 
 :root {
   --board: #E9EDF1;
@@ -280,6 +280,7 @@ textarea { resize: vertical; }
   transform: translate(-50%, 20px); opacity: 0; transition: opacity .25s, transform .25s;
   background: var(--ink); color: #fff; padding: .75em 1.2em; border-radius: 10px;
   max-width: min(92vw, 520px); font-size: .92rem; box-shadow: 0 12px 30px -10px rgba(0, 0, 0, .5);
+  pointer-events: none; /* 消えている間も下のボタンを押せるように */
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast[data-type=error] { background: var(--red); }
@@ -310,9 +311,10 @@ textarea { resize: vertical; }
 @media (max-width: 760px) {
   .viewer.side-open .v-side { position: absolute; left: 0; right: 0; bottom: 0; width: auto; height: 58%; border-radius: 14px 14px 0 0; z-index: 6; box-shadow: 0 -10px 30px rgba(0, 0, 0, .35); }
 }
-.viewer-controls { display: flex; justify-content: center; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px max(12px, env(safe-area-inset-bottom)); }
+.viewer-controls { position: relative; z-index: 7; display: flex; justify-content: center; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px max(12px, env(safe-area-inset-bottom)); }
 .viewer-controls .btn { background: transparent; color: #fff; border-color: rgba(255, 255, 255, .55); }
 .viewer-controls .btn:hover { background: rgba(255, 255, 255, .1); }
+.viewer-controls .btn:disabled { opacity: .35; }
 .viewer-controls .btn[aria-pressed=true] { background: #F2F4F7; color: var(--ink); }
 .viewer-controls select { width: auto; background: transparent; color: #fff; border-color: rgba(255, 255, 255, .55); padding: .4em .6em; font-size: .85rem; }
 .viewer-controls select option { color: var(--ink); }
