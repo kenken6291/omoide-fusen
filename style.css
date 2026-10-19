@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — style.css  v1.1.1 */
+/* おもいで付箋ボード — style.css  v1.3.0 */
 
 :root {
   --board: #E9EDF1;
@@ -505,3 +505,38 @@ body.readonly .note { cursor: pointer; }
 .share-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px dashed #E3E7EC; font-size: .9rem; }
 .share-list .empty { color: var(--ink-soft); border: 0; }
 .side-actions { margin: 10px 0 0; }
+
+/* ---------- v1.2 追加：一括修正・Googleマップ貼り付け・ダイアログのはみ出し対策 ---------- */
+.dlg { overflow: visible; }
+.dlg form { max-height: calc(92vh - 8px); overflow-y: auto; overflow-x: hidden; }
+.photo-edit > *, .row2 > *, .row > input, .row > select { min-width: 0; }
+.pe-img { align-self: start; position: sticky; top: 0; }
+.pe-themes .row { flex-wrap: wrap; }
+.pe-themes .row select { flex: 1 1 160px; }
+.maps-paste { background: #F1F5FB; border-radius: 10px; padding: 10px 12px 4px; margin: 0 0 14px; }
+.maps-paste .field { margin-bottom: 6px; }
+.maps-paste .row input { flex: 1; }
+.maps-result { min-height: 1.2em; margin: 0 0 6px; }
+.maps-result.ok { color: var(--marker); }
+.maps-result.ng { color: var(--red); }
+.bulk-row { display: grid; grid-template-columns: 34px 1fr; align-items: end; }
+.bulk-ck { display: grid; place-items: center; height: 44px; margin-bottom: 14px; cursor: pointer; }
+.bulk-ck input { width: 20px; height: 20px; }
+.bulk-note { margin: -8px 0 12px 34px; }
+#dlg-bulk .maps-paste { margin-left: 34px; }
+#bulk-count { font-weight: 700; margin: 0 0 4px; }
+
+/* ---------- v1.3 追加：重複 ---------- */
+.ph[data-status=dup] img { opacity: .45; filter: grayscale(.6); }
+.ph[data-status=dup] .st { color: #8A5A00; }
+.pe-dup { background: #FFF4D6; border-radius: 8px; padding: 8px 10px; font-size: .88rem; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.dup-list { max-height: 56vh; overflow: auto; display: flex; flex-direction: column; gap: 12px; }
+.dup-group { background: #F6F8FA; border-radius: 10px; padding: 10px; }
+.dup-group p { margin: 0 0 6px; font-size: .82rem; color: var(--ink-soft); }
+.dup-items { display: flex; gap: 8px; flex-wrap: wrap; }
+.dup-item { position: relative; width: 110px; border: 0; padding: 0; background: none; cursor: pointer; text-align: left; }
+.dup-item .im { display: block; width: 110px; height: 110px; background: #E1E6EC center / cover; border-radius: 6px; outline: 3px solid var(--marker); outline-offset: -3px; }
+.dup-item .lb { position: absolute; left: 4px; top: 4px; font-size: .72rem; font-weight: 700; padding: .1em .5em; border-radius: 4px; background: var(--marker); color: #fff; }
+.dup-item .nm { display: block; font-size: .72rem; color: var(--ink-soft); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dup-item.out .im { outline-color: transparent; opacity: .4; filter: grayscale(1); }
+.dup-item.out .lb { background: var(--red); }

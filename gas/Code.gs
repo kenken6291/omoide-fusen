@@ -1,6 +1,6 @@
 /**
  * おもいで付箋ボード (omoide-fusen) — Google Apps Script バックエンド
- * Version 1.1.1
+ * Version 1.3.0
  *
  * ── スクリプトプロパティ ──────────────────────────────
  *   GEMINI_API_KEY          (必須) Google AI Studio の API キー
@@ -26,12 +26,12 @@
  *   ※ コードを変更したら「デプロイを管理 > 編集 > 新バージョン」で再デプロイ
  */
 
-const APP_VERSION = '1.1.1';
+const APP_VERSION = '1.3.0';
 
 const DEF = {
   users:    { name: 'Users',    cols: ['email', 'nickname', 'passwordHash', 'salt', 'isFirstLogin', 'failCount', 'lockedUntil', 'folderId', 'homeFolderId', 'createdAt', 'lastLoginAt'] },
   sessions: { name: 'Sessions', cols: ['token', 'email', 'expiresAt', 'createdAt'] },
-  photos:   { name: 'Photos',   cols: ['fileId', 'email', 'fileName', 'mimeType', 'takenAt', 'lat', 'lng', 'place', 'tags', 'mood', 'scene', 'description', 'status', 'analyzedAt', 'addedAt'] },
+  photos:   { name: 'Photos',   cols: ['fileId', 'email', 'fileName', 'mimeType', 'takenAt', 'lat', 'lng', 'place', 'tags', 'mood', 'scene', 'description', 'status', 'analyzedAt', 'addedAt', 'md5', 'fileSize', 'dupOf'] },
   themes:   { name: 'Themes',   cols: ['themeId', 'email', 'title', 'color', 'x', 'y', 'photoIds', 'coverFileId', 'narration', 'earthVideoUrl', 'createdAt', 'updatedAt', 'excludedIds'] },
   comments: { name: 'Comments', cols: ['commentId', 'email', 'fileId', 'text', 'type', 'createdAt'] },
   shares:   { name: 'Shares',   cols: ['ownerEmail', 'viewerEmail', 'createdAt'] },
@@ -147,6 +147,11 @@ const PRIVATE_ACTIONS = {
   uploadPhoto: uploadPhoto_,
   analyzeBatch: analyzeBatch_,
   updatePhoto: updatePhoto_,
+  bulkUpdatePhotos: bulkUpdatePhotos_,
+  geocode: geocode_,
+  findDuplicates: findDuplicates_,
+  markDuplicates: markDuplicates_,
+  restoreDuplicates: restoreDuplicates_,
   getImages: getImages_,
   // 付箋
   createTheme: createTheme_,
@@ -508,38 +513,74 @@ function photoPub_(r) {
     lat: num_(r.lat), lng: num_(r.lng), place: r.place,
     tags: parseArr_(r.tags), mood: r.mood, scene: r.scene,
     description: r.description, status: r.status || 'pending',
+    dupOf: r.dupOf || '',
   };
 }
 
-function collectImages_(folder, depth, out) {
-  const it = folder.getFiles();
-  while (it.hasNext() && out.length < SCAN_MAX_FILES) {
-    const f = it.next();
-    const mt = f.getMimeType();
-    if (/^image\//.test(mt)) out.push({ id: f.getId(), name: f.getName(), mime: mt });
-  }
-  if (depth > 0) {
-    const fi = folder.getFolders();
-    while (fi.hasNext() && out.length < SCAN_MAX_FILES) collectImages_(fi.next(), depth - 1, out);
-  }
+/** Drive API でフォルダ内の画像を一覧（MD5・サイズ付き、DriveApp より高速） */
+function collectImages_(folderId, depth, out) {
+  const token = ScriptApp.getOAuthToken();
+  const folders = [];
+  let pageToken = '';
+  do {
+    const url = 'https://www.googleapis.com/drive/v3/files?pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true' +
+      '&q=' + encodeURIComponent("'" + folderId + "' in parents and trashed = false") +
+      '&fields=' + encodeURIComponent('nextPageToken,files(id,name,mimeType,md5Checksum,size)') +
+      (pageToken ? '&pageToken=' + encodeURIComponent(pageToken) : '');
+    const r = UrlFetchApp.fetch(url, { headers: { Authorization: 'Bearer ' + token }, muteHttpExceptions: true });
+    if (r.getResponseCode() !== 200) throw err_('フォルダの中身を読み込めませんでした（' + r.getResponseCode() + '）');
+    const j = JSON.parse(r.getContentText());
+    (j.files || []).forEach(f => {
+      if (f.mimeType === 'application/vnd.google-apps.folder') folders.push(f.id);
+      else if (/^image\//.test(f.mimeType) && out.length < SCAN_MAX_FILES) {
+        out.push({ id: f.id, name: f.name, mime: f.mimeType, md5: f.md5Checksum || '', size: Number(f.size) || '' });
+      }
+    });
+    pageToken = j.nextPageToken || '';
+  } while (pageToken && out.length < SCAN_MAX_FILES);
+  if (depth > 0) folders.forEach(id => { if (out.length < SCAN_MAX_FILES) collectImages_(id, depth - 1, out); });
   return out;
 }
 
+/** 重複判定のキー（MD5。なければ ファイル名＋サイズ） */
+function dupKey_(r) {
+  if (r.md5) return 'm:' + r.md5;
+  if (r.fileName && r.fileSize) return 'n:' + String(r.fileName).toLowerCase() + ':' + r.fileSize;
+  return '';
+}
+
 function scanFolder_(req, u) {
-  const found = collectImages_(getFolder_(u.folderId), SCAN_DEPTH, []);
+  getFolder_(u.folderId);
+  const found = collectImages_(u.folderId, SCAN_DEPTH, []);
   const foundIds = {};
-  found.forEach(f => { foundIds[f.id] = true; });
+  found.forEach(f => { foundIds[f.id] = f; });
   const res = withLock_(() => {
     const mine = rows_(DEF.photos).filter(r => r.email === u.email);
     const have = {};
-    mine.forEach(r => { have[r.fileId] = true; });
-    const add = found.filter(f => !have[f.id]).map(f => ({
-      fileId: f.id, email: u.email, fileName: f.name, mimeType: f.mime, status: 'pending', addedAt: now_(),
-    }));
+    const keeper = {};
+    mine.forEach(r => {
+      have[r.fileId] = true;
+      const f = foundIds[r.fileId];
+      const k = dupKey_({ md5: r.md5 || (f && f.md5), fileName: r.fileName, fileSize: r.fileSize || (f && f.size) });
+      if (k && r.status !== 'dup' && !keeper[k]) keeper[k] = r.fileId;
+    });
+    // 既存の写真に MD5・サイズを記録
+    const fill = mine.filter(r => foundIds[r.fileId] && (!r.md5 || !r.fileSize))
+      .map(r => ({ row: r._row, obj: { md5: foundIds[r.fileId].md5, fileSize: foundIds[r.fileId].size } }));
+    patchMany_(DEF.photos, fill);
+    // 新しい写真（同じ内容の写真がすでにあれば「重複」として対象から外す）
+    let dup = 0;
+    const add = found.filter(f => !have[f.id]).map(f => {
+      const row = { fileId: f.id, email: u.email, fileName: f.name, mimeType: f.mime, status: 'pending', addedAt: now_(), md5: f.md5, fileSize: f.size };
+      const k = dupKey_(row);
+      if (k && keeper[k]) { row.status = 'dup'; row.dupOf = keeper[k]; dup++; }
+      else if (k) keeper[k] = f.id;
+      return row;
+    });
     if (add.length) insertMany_(DEF.photos, add);
     const gone = mine.filter(r => !foundIds[r.fileId]).map(r => r._row);
     deleteRows_(DEF.photos, gone);
-    return { added: add.length, removed: gone.length };
+    return { added: add.length, removed: gone.length, duplicates: dup };
   });
   forgetOwn_(u.email);
   res.photos = rows_(DEF.photos).filter(r => r.email === u.email).map(photoPub_);
@@ -551,10 +592,15 @@ function uploadPhoto_(req, u) {
   const mime = String(req.mimeType || 'image/jpeg');
   if (!/^image\//.test(mime)) throw err_('画像ファイルだけ追加できます。');
   if (!req.data) throw err_('ファイルが空です。');
+  const bytes = Utilities.base64Decode(req.data);
+  const md5 = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, bytes).map(b => ('0' + (b & 0xff).toString(16)).slice(-2)).join('');
+  // 同じ内容の写真がすでにあればアップロードしない
+  const same = rows_(DEF.photos).find(r => r.email === u.email && r.md5 === md5);
+  if (same) return { duplicate: true, photo: photoPub_(same) };
   const folderId = ensureSubFolder_(u.folderId, req.subPath);
-  const blob = Utilities.newBlob(Utilities.base64Decode(req.data), mime, name);
+  const blob = Utilities.newBlob(bytes, mime, name);
   const file = getFolder_(folderId).createFile(blob);
-  const row = { fileId: file.getId(), email: u.email, fileName: name, mimeType: mime, status: 'pending', addedAt: now_() };
+  const row = { fileId: file.getId(), email: u.email, fileName: name, mimeType: mime, status: 'pending', addedAt: now_(), md5, fileSize: bytes.length };
   withLock_(() => insert_(DEF.photos, row));
   forgetOwn_(u.email);
   return { photo: photoPub_(row) };
@@ -570,6 +616,144 @@ function updatePhoto_(req, u) {
     return photoPub_(Object.assign({}, r, fields));
   });
   return { photo };
+}
+
+/**
+ * 選んだ複数の写真の 撮影日時・撮影地・緯度・経度 をまとめて書き換える
+ * 撮影日時に日付だけを渡した場合は、各写真の時刻を残して日付だけ変える
+ */
+/**
+ * 重複している写真を探す（MD5が同じ、MD5がなければ ファイル名＋サイズが同じ）
+ * 残す1枚は「付箋に入っている」「解析済み」「先に登録した」ものを優先
+ */
+function findDuplicates_(req, u) {
+  let mine = rows_(DEF.photos).filter(r => r.email === u.email);
+  const missing = mine.filter(r => !r.md5 || !r.fileSize).map(r => r.fileId);
+  if (missing.length) {
+    const metas = driveMetaMany_(missing, 'id,md5Checksum,size');
+    withLock_(() => {
+      const ups = [];
+      rows_(DEF.photos).forEach(r => {
+        const m = r.email === u.email && metas[r.fileId];
+        if (m) ups.push({ row: r._row, obj: { md5: m.md5Checksum || '', fileSize: Number(m.size) || '' } });
+      });
+      patchMany_(DEF.photos, ups);
+    });
+    mine = rows_(DEF.photos).filter(r => r.email === u.email);
+  }
+  const inTheme = {};
+  rows_(DEF.themes).filter(t => t.email === u.email).forEach(t => parseArr_(t.photoIds).forEach(id => { inTheme[id] = (inTheme[id] || 0) + 1; }));
+  const groups = {};
+  mine.forEach(r => {
+    const k = dupKey_(r);
+    if (k) (groups[k] = groups[k] || []).push(r);
+  });
+  const score = r => (r.status !== 'dup' ? 1000 : 0) + (inTheme[r.fileId] ? 100 : 0) + (r.status === 'done' ? 10 : 0);
+  const out = Object.keys(groups).map(k => groups[k]).filter(g => g.length > 1).map(g => {
+    g.sort((a, b) => score(b) - score(a) || String(a.addedAt).localeCompare(String(b.addedAt)));
+    return { fileIds: g.map(r => r.fileId), exact: g[0].md5 ? true : false };
+  });
+  return { groups: out, photos: mine.map(photoPub_) };
+}
+
+/** 重複として対象から外す（付箋に入っていたら残す写真に置き換える） */
+function markDuplicates_(req, u) {
+  const own = ownSet_(u.email);
+  const items = (Array.isArray(req.items) ? req.items : []).filter(x => x && own[x.fileId] && x.fileId !== x.dupOf).slice(0, 3000);
+  if (!items.length) throw err_('外す写真を選んでください。');
+  const dupOf = {};
+  items.forEach(x => { dupOf[x.fileId] = own[x.dupOf] ? String(x.dupOf) : ''; });
+  const photos = [], themes = [];
+  withLock_(() => {
+    const pu = [];
+    rows_(DEF.photos).forEach(r => {
+      if (r.email !== u.email || dupOf[r.fileId] === undefined) return;
+      const obj = { status: 'dup', dupOf: dupOf[r.fileId] };
+      pu.push({ row: r._row, obj });
+      photos.push(photoPub_(Object.assign({}, r, obj)));
+    });
+    patchMany_(DEF.photos, pu);
+    const tu = [];
+    rows_(DEF.themes).forEach(t => {
+      if (t.email !== u.email) return;
+      const ids = parseArr_(t.photoIds);
+      if (!ids.some(id => dupOf[id] !== undefined)) return;
+      const next = [];
+      ids.forEach(id => {
+        const v = dupOf[id] !== undefined ? dupOf[id] : id;
+        if (v && dupOf[v] === undefined && next.indexOf(v) < 0) next.push(v);
+      });
+      let cover = t.coverFileId;
+      if (dupOf[cover] !== undefined) cover = dupOf[cover];
+      if (next.indexOf(cover) < 0) cover = next[0] || '';
+      const obj = { photoIds: JSON.stringify(next), coverFileId: cover, narration: '', updatedAt: now_() };
+      tu.push({ row: t._row, obj });
+      themes.push(themePub_(Object.assign({}, t, obj)));
+    });
+    patchMany_(DEF.themes, tu);
+  });
+  return { photos, themes };
+}
+
+/** 重複として外した写真を対象に戻す */
+function restoreDuplicates_(req, u) {
+  const want = {};
+  (Array.isArray(req.fileIds) ? req.fileIds : []).forEach(id => { want[id] = true; });
+  const photos = [];
+  withLock_(() => {
+    const pu = [];
+    rows_(DEF.photos).forEach(r => {
+      if (r.email !== u.email || !want[r.fileId] || r.status !== 'dup') return;
+      const analyzed = !!(r.description || parseArr_(r.tags).length);
+      const obj = { status: analyzed ? 'done' : 'pending', dupOf: '' };
+      pu.push({ row: r._row, obj });
+      photos.push(photoPub_(Object.assign({}, r, obj)));
+    });
+    patchMany_(DEF.photos, pu);
+  });
+  return { photos };
+}
+
+function dupSet_(email) {
+  const set = {};
+  rows_(DEF.photos).forEach(r => { if (r.email === email && r.status === 'dup') set[r.fileId] = true; });
+  return set;
+}
+
+function bulkUpdatePhotos_(req, u) {
+  const own = ownSet_(u.email);
+  const ids = unique_((Array.isArray(req.fileIds) ? req.fileIds : []).map(String).filter(id => own[id])).slice(0, 3000);
+  if (!ids.length) throw err_('写真を選んでください。');
+  const f = req.fields || {};
+  const base = {};
+  ['place', 'lat', 'lng'].forEach(k => { if (f[k] !== undefined) base[k] = f[k]; });
+  let dateOnly = '';
+  if (f.takenAt !== undefined) {
+    const t = normDate_(f.takenAt);
+    if (t === null) throw err_('撮影日時は 2024-08-15 または 2024-08-15 14:30 の形式で入力してください。');
+    if (t.length === 10) dateOnly = t; else base.takenAt = t;
+  }
+  const clean = photoFields_(base);
+  if (!Object.keys(clean).length && !dateOnly) throw err_('変更する項目にチェックを入れてください。');
+  const photos = [];
+  withLock_(() => {
+    const map = {};
+    rows_(DEF.photos).forEach(r => { if (r.email === u.email) map[r.fileId] = r; });
+    const ups = [];
+    ids.forEach(id => {
+      const r = map[id];
+      if (!r) return;
+      const obj = Object.assign({}, clean);
+      if (dateOnly) {
+        const old = String(r.takenAt || '');
+        obj.takenAt = dateOnly + (old.length >= 16 ? old.slice(10, 16) : '');
+      }
+      ups.push({ row: r._row, obj });
+      photos.push(photoPub_(Object.assign({}, r, obj)));
+    });
+    patchMany_(DEF.photos, ups);
+  });
+  return { photos };
 }
 
 function photoFields_(f) {
@@ -612,7 +796,7 @@ function analyzeBatch_(req, u) {
   if (Array.isArray(req.fileIds) && req.fileIds.length) {
     const want = {};
     req.fileIds.forEach(id => { want[id] = true; });
-    targets = mine.filter(r => want[r.fileId]).slice(0, limit);
+    targets = mine.filter(r => want[r.fileId] && r.status !== 'dup').slice(0, limit);
   } else {
     const st = req.retryErrors ? ['pending', 'error'] : ['pending'];
     targets = mine.filter(r => st.indexOf(r.status || 'pending') >= 0).slice(0, limit);
@@ -753,8 +937,8 @@ function forgetOwn_(email) {
   delete MEMO['own:' + email];
 }
 
-function driveMetaMany_(ids) {
-  const fields = 'id,name,mimeType,createdTime,thumbnailLink,imageMediaMetadata(time,location,width,height)';
+function driveMetaMany_(ids, fieldsOpt) {
+  const fields = fieldsOpt || 'id,name,mimeType,createdTime,thumbnailLink,imageMediaMetadata(time,location,width,height)';
   const token = ScriptApp.getOAuthToken();
   const out = {};
   for (let i = 0; i < ids.length; i += 20) {
@@ -813,6 +997,100 @@ function reverseGeocode_(lat, lng) {
   return place;
 }
 
+/**
+ * Googleマップから貼り付けた内容を緯度・経度にする
+ *  - 座標（35.53, 139.69）、URL（@lat,lng / !3dlat!4dlng）、共有の短縮リンク（maps.app.goo.gl）、住所 に対応
+ *  - lat/lng を渡すと、その地点の地名だけ返す
+ */
+function geocode_(req) {
+  if (req.lat !== undefined && req.lng !== undefined) {
+    const lat = Number(req.lat), lng = Number(req.lng);
+    if (isNaN(lat) || isNaN(lng)) throw err_('緯度・経度が数字ではありません。');
+    return { lat, lng, place: reverseGeocode_(lat, lng) };
+  }
+  let q = String(req.query || '').trim().slice(0, 1000);
+  if (!q) throw err_('貼り付けた内容が空です。');
+  if (/^https?:\/\/(maps\.app\.goo\.gl|goo\.gl\/maps|g\.co\/kgs|maps\.google\.|www\.google\.[^/]+\/maps)/i.test(q)) q = expandUrl_(q);
+  const c = parseLatLng_(q);
+  if (c) return { lat: c.lat, lng: c.lng, place: reverseGeocode_(c.lat, c.lng) };
+  const pm = q.match(/\/place\/([^/@?]+)/) || q.match(/[?&](?:q|query|destination)=([^&]+)/);
+  if (pm) q = decodeURIComponent(pm[1].replace(/\+/g, ' '));
+  if (/^https?:/i.test(q)) throw err_('このリンクから位置を読み取れませんでした。Googleマップで地点を右クリックして出る「35.xxx, 139.xxx」の数字を貼り付けてください。');
+  q = q.replace(/^日本、\s*/, '').replace(/^〒?\s*[0-9０-９]{3}[-－ー]?[0-9０-９]{4}\s*/, '').trim();
+  const res = forwardGeocode_(q);
+  if (!res) throw err_('この住所の位置が見つかりませんでした。住所を短くするか、座標を貼り付けてください。');
+  const loc = res.geometry.location;
+  return { lat: Number(loc.lat), lng: Number(loc.lng), place: placeFromResult_(res), formatted: res.formatted_address };
+}
+
+function parseLatLng_(s) {
+  s = String(s || '');
+  const m = s.match(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/) ||
+    s.match(/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/) ||
+    s.match(/[?&](?:q|query|ll|center|destination)=(-?\d+(?:\.\d+)?)(?:,|%2C)\s*(-?\d+(?:\.\d+)?)/i) ||
+    s.match(/^\s*\(?\s*(-?\d{1,2}(?:\.\d+)?)\s*[,，、\s]\s*(-?\d{1,3}(?:\.\d+)?)\s*\)?\s*$/);
+  if (!m) return null;
+  const lat = Number(m[1]), lng = Number(m[2]);
+  if (isNaN(lat) || isNaN(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  return { lat, lng };
+}
+
+function expandUrl_(url) {
+  let cur = url;
+  for (let i = 0; i < 5; i++) {
+    let r;
+    try { r = UrlFetchApp.fetch(cur, { followRedirects: false, muteHttpExceptions: true }); } catch (e) { break; }
+    const h = r.getAllHeaders();
+    let loc = h.Location || h.location;
+    if (!loc) break;
+    cur = Array.isArray(loc) ? loc[0] : loc;
+    if (parseLatLng_(cur) || /\/place\//.test(cur)) break;
+  }
+  return cur;
+}
+
+function forwardGeocode_(q) {
+  const cache = CacheService.getScriptCache();
+  const ck = 'fgeo:' + digest_(q);
+  const hit = cache.get(ck);
+  if (hit) return JSON.parse(hit);
+  let res = null;
+  try {
+    const key = prop_('GOOGLE_MAPS_SERVER_KEY', '');
+    if (key) {
+      const url = 'https://maps.googleapis.com/maps/api/geocode/json?language=ja&region=jp&address=' +
+        encodeURIComponent(q) + '&key=' + encodeURIComponent(key);
+      const j = JSON.parse(UrlFetchApp.fetch(url, { muteHttpExceptions: true }).getContentText() || '{}');
+      if (j.status === 'OK') res = j.results[0];
+    }
+    if (!res) {
+      const r2 = Maps.newGeocoder().setLanguage('ja').setRegion('jp').geocode(q);
+      res = r2 && r2.results && r2.results[0];
+    }
+  } catch (e) { console.warn('geocode: ' + e); }
+  if (res) {
+    const slim = { geometry: { location: res.geometry.location }, address_components: res.address_components, formatted_address: res.formatted_address };
+    cache.put(ck, JSON.stringify(slim), 21600);
+    return slim;
+  }
+  return null;
+}
+
+function placeFromResult_(res) {
+  const pick = type => {
+    const c = (res.address_components || []).find(a => a.types.indexOf(type) >= 0);
+    return c ? c.long_name : '';
+  };
+  const country = pick('country');
+  const parts = [
+    country && country !== '日本' ? country : '',
+    pick('administrative_area_level_1'),
+    pick('locality'),
+    pick('sublocality_level_1') || pick('sublocality_level_2'),
+  ].filter(Boolean);
+  return parts.length ? parts.join(' ') : String(res.formatted_address || '').replace(/^日本、(〒\d{3}-\d{4} )?/, '');
+}
+
 function reverseGeocodeRaw_(lat, lng) {
   try {
     let res = null;
@@ -829,18 +1107,7 @@ function reverseGeocodeRaw_(lat, lng) {
       res = r2 && r2.results && r2.results[0];
     }
     if (!res) return '';
-    const pick = type => {
-      const c = res.address_components.find(a => a.types.indexOf(type) >= 0);
-      return c ? c.long_name : '';
-    };
-    const country = pick('country');
-    const parts = [
-      country && country !== '日本' ? country : '',
-      pick('administrative_area_level_1'),
-      pick('locality'),
-      pick('sublocality_level_1') || pick('sublocality_level_2'),
-    ].filter(Boolean);
-    return parts.length ? parts.join(' ') : String(res.formatted_address || '').replace(/^日本、(〒\d{3}-\d{4} )?/, '');
+    return placeFromResult_(res);
   } catch (e) {
     return '';
   }
@@ -868,7 +1135,8 @@ function createTheme_(req, u) {
   let photoIds, cover, method = 'manual';
   if (Array.isArray(req.photoIds)) {
     const own = ownSet_(u.email);
-    photoIds = unique_(req.photoIds.map(String).filter(id => own[id]));
+    const dup = dupSet_(u.email);
+    photoIds = unique_(req.photoIds.map(String).filter(id => own[id] && !dup[id]));
     cover = own[req.coverFileId] && photoIds.indexOf(req.coverFileId) >= 0 ? req.coverFileId : (photoIds[0] || '');
   } else {
     const m = matchTheme_(u, title, req.mode, []);
@@ -934,9 +1202,10 @@ function deleteTheme_(req, u) {
 /** 写真を付箋に追加／付箋から外す（外した写真は除外リストへ入り、探し直しても戻らない） */
 function assignPhotos_(req, u) {
   const own = ownSet_(u.email);
-  const ids = unique_((req.fileIds || []).map(String).filter(id => own[id]));
-  if (!ids.length) throw err_('写真を選んでください。');
   const remove = req.mode === 'remove';
+  const dup = remove ? {} : dupSet_(u.email);
+  const ids = unique_((req.fileIds || []).map(String).filter(id => own[id] && !dup[id]));
+  if (!ids.length) throw err_(remove ? '写真を選んでください。' : '入れられる写真がありません（重複で外した写真は入れられません）。');
   const theme = withLock_(() => {
     const r = findTheme_(u, req.themeId);
     let photos = parseArr_(r.photoIds);
@@ -1026,7 +1295,7 @@ function matchTheme_(u, title, mode, excluded) {
   mode = mode || 'auto';
   const ex = {};
   (excluded || []).forEach(id => { ex[id] = true; });
-  const mine = rows_(DEF.photos).filter(r => r.email === u.email)
+  const mine = rows_(DEF.photos).filter(r => r.email === u.email && r.status !== 'dup')
     .sort((a, b) => String(a.takenAt).localeCompare(String(b.takenAt)));
 
   if (mode !== 'ai') {
@@ -1092,7 +1361,7 @@ function generateNarration_(req, u) {
   const t = findTheme_(u, req.themeId);
   const ids = parseArr_(t.photoIds);
   const map = {};
-  rows_(DEF.photos).filter(r => r.email === u.email).forEach(r => { map[r.fileId] = r; });
+  rows_(DEF.photos).filter(r => r.email === u.email && r.status !== 'dup').forEach(r => { map[r.fileId] = r; });
   const photos = sampleEven_(
     ids.map(id => map[id]).filter(Boolean).sort((a, b) => String(a.takenAt).localeCompare(String(b.takenAt))),
     MAX_NARRATION_PHOTOS);

@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — app.js  v1.1.1 */
+/* おもいで付箋ボード — app.js  v1.3.0 */
 (() => {
   'use strict';
 
@@ -449,6 +449,8 @@
   }
   function updatePhotoCount() { $('#photo-count').textContent = S.photos.length; }
   const analyzedCount = () => S.photos.filter(p => p.status === 'done').length;
+  /** 対象の写真か（重複で外した写真・存在しない写真は除く） */
+  const isActive = id => { const p = S.photoMap.get(id); return !!p && p.status !== 'dup'; };
   function membershipCount() {
     const m = new Map();
     S.themes.forEach(t => t.photoIds.forEach(id => m.set(id, (m.get(id) || 0) + 1)));
@@ -468,7 +470,7 @@
   }
   function noteEl(t) {
     const el = document.createElement('article');
-    const count = t.photoIds.filter(id => S.photoMap.has(id)).length;
+    const count = t.photoIds.filter(isActive).length;
     el.className = 'note';
     el.dataset.id = t.themeId;
     el.style.left = t.x + 'px';
@@ -1047,7 +1049,7 @@
       const r = await api('scanFolder');
       setPhotos(r.photos);
       renderPhotoGrid();
-      toast(`${r.added}枚を追加${r.removed ? `、${r.removed}枚をリストから外しました` : 'しました'}。`);
+      toast(`${r.added}枚を追加${r.removed ? `、${r.removed}枚をリストから外しました` : 'しました'}。${r.duplicates ? `うち${r.duplicates}枚は重複のため対象から外しました（「重複で外した写真」で確認できます）。` : ''}`);
     } catch (err) { toast(err.message, 'error'); } finally { busy(false); }
   });
 
@@ -1061,7 +1063,7 @@
     p.querySelector('p').textContent = text;
   }
   function libBusy(on) {
-    ['#btn-scan', '#btn-analyze', '#file-input', '#dir-input', '#sel-analyze', '#sel-to-theme', '#excel-in', '#btn-excel-out']
+    ['#btn-scan', '#btn-analyze', '#file-input', '#dir-input', '#sel-analyze', '#sel-to-theme', '#sel-bulk', '#sel-dup', '#sel-restore', '#btn-dups', '#excel-in', '#btn-excel-out']
       .forEach(s => { $(s).disabled = on; });
   }
 
@@ -1119,7 +1121,7 @@
     if (!list.length) return;
     const folders = withPath ? uniq(list.map(f => (f.webkitRelativePath || '').split('/').slice(0, -1).join('/')).filter(Boolean)) : [];
     stopFlag = false; libBusy(true);
-    let idx = 0, done = 0, ok = 0, fail = 0;
+    let idx = 0, done = 0, ok = 0, fail = 0, same = 0;
     progress(true, 0, `アップロード中… 0 / ${list.length}`);
     const worker = async () => {
       while (!stopFlag && idx < list.length) {
@@ -1128,8 +1130,8 @@
           const data = await fileToBase64(f);
           const subPath = withPath ? (f.webkitRelativePath || '').split('/').slice(0, -1).join('/') : '';
           const r = await api('uploadPhoto', { fileName: f.name, mimeType: f.type || 'image/heic', data, subPath });
-          mergePhotos([r.photo]);
-          ok++;
+          if (r.duplicate) same++;
+          else { mergePhotos([r.photo]); ok++; }
         } catch (err) { fail++; console.warn(f.name, err); }
         done++;
         progress(true, done / list.length, `アップロード中… ${done} / ${list.length}`);
@@ -1138,7 +1140,7 @@
     try { await Promise.all(Array.from({ length: Math.min(UPLOAD_PARALLEL, list.length) }, worker)); }
     finally { progress(false); libBusy(false); renderPhotoGrid(); }
     const where = folders.length ? `（フォルダ「${folders[0].split('/')[0]}」として保存）` : '';
-    toast(`${ok}枚を追加しました${where}${fail ? `。${fail}枚は失敗しました` : ''}。`, fail ? 'warn' : 'info');
+    toast(`${ok}枚を追加しました${where}${same ? `。${same}枚は同じ写真がすでにあるため追加しませんでした` : ''}${fail ? `。${fail}枚は失敗しました` : ''}。`, fail ? 'warn' : 'info');
   }
   function fileToBase64(f) {
     return new Promise((resolve, reject) => {
@@ -1154,8 +1156,11 @@
     const words = LIB.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
     const mc = membershipCount();
     return chrono(S.photos).reverse().filter(p => {
-      if (LIB.filter === 'orphan') { if (mc.get(p.fileId)) return false; }
-      else if (LIB.filter !== 'all' && (p.status || 'pending') !== LIB.filter) return false;
+      const st = p.status || 'pending';
+      if (LIB.filter === 'dup') { if (st !== 'dup') return false; }
+      else if (st === 'dup') return false;
+      else if (LIB.filter === 'orphan') { if (mc.get(p.fileId)) return false; }
+      else if (LIB.filter !== 'all' && st !== LIB.filter) return false;
       if (!words.length) return true;
       const text = [p.fileName, p.takenAt, p.place, (p.tags || []).join(' '), p.scene, p.mood, p.description].join(' ').toLowerCase();
       return words.every(w => text.includes(w));
@@ -1167,7 +1172,7 @@
     if (gridObserver) gridObserver.disconnect();
     const list = filteredPhotos();
     const mc = membershipCount();
-    const label = { pending: '未解析', done: '解析済み', error: 'エラー' };
+    const label = { pending: '未解析', done: '解析済み', error: 'エラー', dup: '重複' };
     grid.classList.toggle('selecting', LIB.selecting);
     grid.innerHTML = list.map(p => `
       <button type="button" class="ph${LIB.selected.has(p.fileId) ? ' sel' : ''}" data-file="${esc(p.fileId)}" data-status="${p.status || 'pending'}"
@@ -1185,11 +1190,12 @@
     }, { root: $('.lib-scroll'), rootMargin: '300px' });
     $$('.ph', grid).forEach(el => gridObserver.observe(el));
 
-    const n = S.photos.length;
+    const dupN = S.photos.filter(p => p.status === 'dup').length;
+    const n = S.photos.length - dupN;
     const done = S.photos.filter(p => p.status === 'done').length;
     const err = S.photos.filter(p => p.status === 'error').length;
-    $('#photo-stats').textContent = n
-      ? `全${n}枚（解析済み ${done} ／ 未解析 ${n - done - err}${err ? ` ／ エラー ${err}` : ''}）　表示中 ${list.length}枚`
+    $('#photo-stats').textContent = (n + dupN)
+      ? `全${n}枚（解析済み ${done} ／ 未解析 ${n - done - err}${err ? ` ／ エラー ${err}` : ''}）${dupN ? `　重複で外した写真 ${dupN}枚` : ''}　表示中 ${list.length}枚`
       : 'まだ写真がありません。写真やフォルダを追加するか、ドライブのフォルダを読み込んでください。';
     updateSelBar();
   }
@@ -1208,6 +1214,9 @@
   }
   function updateSelBar() {
     $('#lib-selbar').hidden = !LIB.selecting;
+    $('#sel-restore').hidden = LIB.filter !== 'dup';
+    $('#sel-dup').hidden = LIB.filter === 'dup';
+    ['#sel-to-theme', '#sel-bulk', '#sel-analyze'].forEach(x => { $(x).hidden = LIB.filter === 'dup'; });
     $('#sel-count').textContent = `${LIB.selected.size}枚を選択中`;
   }
   $('#btn-select').addEventListener('click', () => setSelecting(!LIB.selecting));
@@ -1240,6 +1249,10 @@
   /* 付箋に入れる */
   let ASSIGN = [];
   function openAssign(ids) {
+    const skipped = ids.filter(id => !isActive(id)).length;
+    ids = ids.filter(isActive);
+    if (!ids.length) return toast('重複で外した写真は付箋に入れられません。', 'warn');
+    if (skipped) toast(`重複で外した${skipped}枚は除きます。`, 'warn');
     ASSIGN = ids;
     $('#assign-count').textContent = `${ids.length}枚の写真を付箋に入れます。`;
     $('#assign-theme').innerHTML = '<option value="__new">＋ 新しい付箋を作る</option>' +
@@ -1293,6 +1306,14 @@
     f.elements.namedItem('mood').value = p.mood || '';
     f.elements.namedItem('description').value = p.description || '';
     f.elements.namedItem('done').checked = p.status === 'done';
+    f.elements.namedItem('done').disabled = p.status === 'dup';
+    resetMapsPaste(f);
+    const dupBox = $('#pe-dup');
+    dupBox.hidden = p.status !== 'dup';
+    if (p.status === 'dup') {
+      const orig = p.dupOf && S.photoMap.get(p.dupOf);
+      dupBox.querySelector('span').textContent = `重複のため対象から外しています${orig ? `（残している写真：${orig.fileName || ''}）` : ''}。`;
+    }
     $('#pe-name').textContent = p.fileName || '';
   }
   function renderPeThemes() {
@@ -1348,7 +1369,7 @@
       lat: f.elements.namedItem('lat').value.trim(), lng: f.elements.namedItem('lng').value.trim(),
       tags: splitList(f.elements.namedItem('tags').value),
       scene: f.elements.namedItem('scene').value.trim(), mood: f.elements.namedItem('mood').value.trim(), description: f.elements.namedItem('description').value.trim(),
-      status: f.elements.namedItem('done').checked ? 'done' : (p.status === 'done' ? 'pending' : p.status),
+      status: p.status === 'dup' ? undefined : (f.elements.namedItem('done').checked ? 'done' : (p.status === 'done' ? 'pending' : p.status)),
     };
     try {
       const r = await api('updatePhoto', { fileId: PE.fileId, fields });
@@ -1356,6 +1377,272 @@
       $('#dlg-photo').close();
       if (PE.onSaved) PE.onSaved(r.photo);
       toast('写真の情報を保存しました。');
+    } catch (err) { toast(err.message, 'error'); }
+  });
+
+  /* ============================================================
+   * Googleマップから貼り付け → 緯度・経度（座標・URL・共有リンク・住所）
+   * ============================================================ */
+  function parseLatLng(s) {
+    s = String(s || '').trim();
+    const m = s.match(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/) ||
+      s.match(/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/) ||
+      s.match(/[?&](?:q|query|ll|center|destination)=(-?\d+(?:\.\d+)?)(?:,|%2C)\s*(-?\d+(?:\.\d+)?)/i) ||
+      s.match(/^\(?\s*(-?\d{1,2}(?:\.\d+)?)\s*[,，、\s]\s*(-?\d{1,3}(?:\.\d+)?)\s*\)?$/);
+    let lat, lng;
+    if (m) {
+      lat = Number(m[1]); lng = Number(m[2]);
+    } else {
+      // 35°31'52.3"N 139°41'48.6"E の形式
+      const d = s.match(/(\d+(?:\.\d+)?)°\s*(?:(\d+(?:\.\d+)?)['′]\s*)?(?:(\d+(?:\.\d+)?)["″]\s*)?([NS北南])[\s,，]*(\d+(?:\.\d+)?)°\s*(?:(\d+(?:\.\d+)?)['′]\s*)?(?:(\d+(?:\.\d+)?)["″]\s*)?([EW東西])/i);
+      if (!d) return null;
+      const dms = (a, b, c) => Number(a) + Number(b || 0) / 60 + Number(c || 0) / 3600;
+      lat = dms(d[1], d[2], d[3]) * (/[S南]/i.test(d[4]) ? -1 : 1);
+      lng = dms(d[5], d[6], d[7]) * (/[W西]/i.test(d[8]) ? -1 : 1);
+    }
+    if (isNaN(lat) || isNaN(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+    return { lat, lng };
+  }
+  function resetMapsPaste(form) {
+    const inp = form.elements.namedItem('mapsPaste');
+    if (inp) inp.value = '';
+    const out = form.querySelector('.maps-result');
+    if (out) { out.textContent = ''; out.className = 'muted small maps-result'; }
+  }
+  function tickUse(form, name) {
+    const c = form.elements.namedItem('use_' + name);
+    if (c) c.checked = true;
+  }
+  function setField(form, name, v) {
+    const el = form.elements.namedItem(name);
+    if (!el) return;
+    el.value = v;
+    tickUse(form, name);
+  }
+  async function convertMaps(form) {
+    const inp = form.elements.namedItem('mapsPaste');
+    const out = form.querySelector('.maps-result');
+    const q = inp.value.trim();
+    if (!q) return;
+    const show = (t, cls) => { out.textContent = t; out.className = 'small maps-result ' + (cls || 'muted'); };
+    let r = parseLatLng(q);
+    const placeEl = form.elements.namedItem('place');
+    const wantPlace = !!placeEl && (!placeEl.value.trim() || placeEl.value.trim().startsWith('（推定）'));
+    try {
+      if (!r) {
+        show('Googleマップの情報から位置を調べています…');
+        r = await api('geocode', { query: q });
+      } else if (wantPlace) {
+        show('地名を調べています…');
+        const g = await api('geocode', { lat: r.lat, lng: r.lng }).catch(() => null);
+        if (g) r.place = g.place;
+      }
+    } catch (err) { show(err.message, 'ng'); return; }
+    setField(form, 'lat', Number(r.lat).toFixed(6));
+    setField(form, 'lng', Number(r.lng).toFixed(6));
+    if (r.place && wantPlace) setField(form, 'place', r.place);
+    show(`緯度 ${Number(r.lat).toFixed(6)} ／ 経度 ${Number(r.lng).toFixed(6)}${r.place ? `（${r.place}）` : ''} を入れました。`, 'ok');
+  }
+  document.addEventListener('click', e => {
+    const b = e.target.closest('[data-maps-convert]');
+    if (b) convertMaps(b.closest('form'));
+  });
+  document.addEventListener('paste', e => {
+    const t = e.target;
+    if (!t || !t.form) return;
+    if (t.name === 'mapsPaste') { setTimeout(() => convertMaps(t.form), 0); return; }
+    // 緯度・経度の欄に「35.53, 139.69」を貼ったら両方に分けて入れる
+    if (t.name === 'lat' || t.name === 'lng') {
+      const text = (e.clipboardData || window.clipboardData).getData('text');
+      const r = parseLatLng(text);
+      if (r) {
+        e.preventDefault();
+        setField(t.form, 'lat', r.lat.toFixed(6));
+        setField(t.form, 'lng', r.lng.toFixed(6));
+      }
+    }
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.target && e.target.name === 'mapsPaste') { e.preventDefault(); convertMaps(e.target.form); }
+  });
+
+  /* ============================================================
+   * 撮影日時・場所の一括修正
+   * ============================================================ */
+  let BULK = [];
+  $('#sel-bulk').addEventListener('click', () => {
+    const ids = [...LIB.selected];
+    if (!ids.length) return toast('写真を選んでください。', 'warn');
+    BULK = ids;
+    const f = $('#dlg-bulk form');
+    f.reset();
+    resetMapsPaste(f);
+    $('#bulk-count').textContent = `選んだ ${ids.length}枚の写真を修正します。`;
+    // 全員同じ値ならあらかじめ入れておく
+    const ps = ids.map(id => S.photoMap.get(id)).filter(Boolean);
+    const same = k => { const v = ps.map(p => (p[k] == null ? '' : String(p[k]))); return v.every(x => x === v[0]) ? v[0] : ''; };
+    const dates = uniq(ps.map(p => String(p.takenAt || '').slice(0, 10)));
+    f.elements.namedItem('takenAt').value = dates.length === 1 ? dates[0] : '';
+    f.elements.namedItem('place').value = same('place');
+    f.elements.namedItem('lat').value = same('lat');
+    f.elements.namedItem('lng').value = same('lng');
+    $('#dlg-bulk').showModal();
+  });
+  // 入力したら自動で「変更する」にチェック
+  $('#dlg-bulk form').addEventListener('input', e => {
+    const n = e.target.name;
+    if (['takenAt', 'place', 'lat', 'lng'].includes(n)) tickUse(e.currentTarget, n);
+  });
+  $('#dlg-bulk form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const f = e.currentTarget;
+    const fields = {};
+    for (const k of ['takenAt', 'place', 'lat', 'lng']) {
+      if (!f.elements.namedItem('use_' + k).checked) continue;
+      const v = f.elements.namedItem(k).value.trim();
+      if (k === 'takenAt') {
+        const d = normDate(v);
+        if (d === null) return toast('撮影日時は 2024-08-15 または 2024-08-15 14:30 の形式で入力してください。', 'warn');
+        fields.takenAt = d;
+      } else if (k === 'lat' || k === 'lng') {
+        if (v !== '' && isNaN(Number(v))) return toast(`${k === 'lat' ? '緯度' : '経度'}は数字で入力してください。`, 'warn');
+        fields[k] = v;
+      } else {
+        fields[k] = v;
+      }
+    }
+    if (!Object.keys(fields).length) return toast('変更する項目にチェックを入れてください。', 'warn');
+    const label = { takenAt: '撮影日時', place: '撮影地', lat: '緯度', lng: '経度' };
+    if (!confirm(`${BULK.length}枚の「${Object.keys(fields).map(k => label[k]).join('・')}」を書き換えます。よろしいですか？`)) return;
+    busy(`${BULK.length}枚の写真を修正しています…`);
+    try {
+      const r = await api('bulkUpdatePhotos', { fileIds: BULK, fields });
+      mergePhotos(r.photos || []);
+      $('#dlg-bulk').close();
+      setSelecting(false);
+      toast(`${(r.photos || []).length}枚の写真を修正しました。`);
+    } catch (err) { toast(err.message, 'error'); } finally { busy(false); }
+  });
+
+
+  /* ============================================================
+   * 重複している写真
+   * ============================================================ */
+  let DUP = null;
+  $('#btn-dups').addEventListener('click', async () => {
+    busy('重複している写真を探しています…');
+    let r;
+    try { r = await api('findDuplicates'); }
+    catch (err) { toast(err.message, 'error'); return; }
+    finally { busy(false); }
+    setPhotos(r.photos || S.photos);
+    renderPhotoGrid();
+    const groups = r.groups || [];
+    if (!groups.length) return toast('重複している写真はありませんでした。');
+    DUP = { groups, out: new Set() };
+    groups.forEach(g => g.fileIds.forEach((id, i) => {
+      const p = S.photoMap.get(id);
+      if (i > 0 || (p && p.status === 'dup')) DUP.out.add(id);
+    }));
+    groups.forEach(g => { if (g.fileIds.every(id => DUP.out.has(id))) DUP.out.delete(g.fileIds[0]); });
+    renderDupList();
+    $('#dlg-dup').showModal();
+  });
+  function renderDupList() {
+    const extra = DUP.groups.reduce((n, g) => n + g.fileIds.length - 1, 0);
+    $('#dup-summary').textContent = `${DUP.groups.length}組・${extra}枚の重複が見つかりました。`;
+    $('#dup-list').innerHTML = DUP.groups.map((g, gi) => `
+      <div class="dup-group" data-g="${gi}">
+        <p>${g.exact ? '内容がまったく同じ写真' : 'ファイル名と大きさが同じ写真'}（${g.fileIds.length}枚）</p>
+        <div class="dup-items">${g.fileIds.map(id => {
+          const p = S.photoMap.get(id) || {};
+          const out = DUP.out.has(id);
+          return `<button type="button" class="dup-item${out ? ' out' : ''}" data-file="${esc(id)}" aria-pressed="${!out}">
+            <span class="im"></span><span class="lb">${out ? '外す' : '残す'}</span>
+            <span class="nm">${esc(p.fileName || id)}</span></button>`;
+        }).join('')}</div>
+      </div>`).join('');
+    $$('.dup-item', $('#dup-list')).forEach(el => {
+      loadImg(el.dataset.file, 'thumb').then(u => { el.querySelector('.im').style.backgroundImage = `url("${u}")`; }).catch(() => {});
+    });
+  }
+  $('#dup-list').addEventListener('click', e => {
+    const b = e.target.closest('.dup-item');
+    if (!b) return;
+    const g = DUP.groups[Number(b.closest('.dup-group').dataset.g)];
+    const id = b.dataset.file;
+    if (DUP.out.has(id)) DUP.out.delete(id);
+    else {
+      if (g.fileIds.filter(x => !DUP.out.has(x)).length <= 1) return toast('各組で1枚は残してください。', 'warn');
+      DUP.out.add(id);
+    }
+    const out = DUP.out.has(id);
+    b.classList.toggle('out', out);
+    b.setAttribute('aria-pressed', String(!out));
+    b.querySelector('.lb').textContent = out ? '外す' : '残す';
+  });
+  $('#dlg-dup form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const items = [], restore = [];
+    DUP.groups.forEach(g => {
+      const keep = g.fileIds.find(id => !DUP.out.has(id));
+      g.fileIds.forEach(id => {
+        const p = S.photoMap.get(id);
+        if (DUP.out.has(id)) { if (!p || p.status !== 'dup' || p.dupOf !== keep) items.push({ fileId: id, dupOf: keep }); }
+        else if (p && p.status === 'dup') restore.push(id);
+      });
+    });
+    $('#dlg-dup').close();
+    if (!items.length && !restore.length) return toast('変更はありませんでした。');
+    busy('重複の写真を対象から外しています…');
+    try {
+      if (restore.length) { const r = await api('restoreDuplicates', { fileIds: restore }); mergePhotos(r.photos || []); }
+      if (items.length) {
+        const r = await api('markDuplicates', { items });
+        mergePhotos(r.photos || []);
+        (r.themes || []).forEach(upsertTheme);
+      }
+      renderPhotoGrid();
+      toast(`${items.length}枚を重複として対象から外しました${restore.length ? `（${restore.length}枚は対象に戻しました）` : ''}。`);
+    } catch (err) { toast(err.message, 'error'); } finally { busy(false); }
+  });
+  $('#sel-dup').addEventListener('click', async () => {
+    const ids = [...LIB.selected].filter(isActive);
+    if (!ids.length) return toast('写真を選んでください。', 'warn');
+    if (!confirm(`選んだ${ids.length}枚を重複として対象から外しますか？\n（AI解析・テーマ検索・付箋・スライドショーの対象外になります。写真ファイルは消えません）`)) return;
+    busy('対象から外しています…');
+    try {
+      const r = await api('markDuplicates', { items: ids.map(id => ({ fileId: id, dupOf: '' })) });
+      mergePhotos(r.photos || []);
+      (r.themes || []).forEach(upsertTheme);
+      setSelecting(false);
+      toast(`${ids.length}枚を対象から外しました。「重複で外した写真」から戻せます。`);
+    } catch (err) { toast(err.message, 'error'); } finally { busy(false); }
+  });
+  async function restoreDups(ids) {
+    busy('対象に戻しています…');
+    try {
+      const r = await api('restoreDuplicates', { fileIds: ids });
+      mergePhotos(r.photos || []);
+      return r.photos || [];
+    } finally { busy(false); }
+  }
+  $('#sel-restore').addEventListener('click', async () => {
+    const ids = [...LIB.selected].filter(id => (S.photoMap.get(id) || {}).status === 'dup');
+    if (!ids.length) return toast('戻す写真を選んでください。', 'warn');
+    try {
+      await restoreDups(ids);
+      setSelecting(false);
+      toast(`${ids.length}枚を対象に戻しました。必要なら付箋に入れ直してください。`);
+    } catch (err) { toast(err.message, 'error'); }
+  });
+  $('#pe-restore').addEventListener('click', async () => {
+    const id = PE.fileId;
+    try {
+      await restoreDups([id]);
+      fillPhotoForm(S.photoMap.get(id));
+      if (PE.onSaved) PE.onSaved(S.photoMap.get(id));
+      toast('対象に戻しました。');
     } catch (err) { toast(err.message, 'error'); }
   });
 
@@ -1604,7 +1891,7 @@
 
   function openViewer(t) {
     if (!t) return;
-    const list = t.photoIds.filter(id => S.photoMap.has(id)).map(photo);
+    const list = t.photoIds.filter(isActive).map(photo);
     if (!list.length) return toast('このテーマには写真がありません。「写真を探し直す」を試してください。', 'warn');
     V.theme = t; V.list = list; V.current = null; V.comments = new Map();
     $('#v-title').textContent = t.title;
