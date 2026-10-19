@@ -11,7 +11,7 @@
 <link rel="preconnect" href="https://script.google.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Klee+One:wght@400;600&family=Shippori+Mincho:wght@500;700&family=Zen+Maru+Gothic:wght@500;700&display=swap">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%93%8C%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="style.css?v=1.3.0">
+<link rel="stylesheet" href="style.css?v=1.3.2">
 </head>
 <body>
 
@@ -151,7 +151,7 @@
   <div class="lib-scroll">
     <details class="lib-folder">
       <summary>読み込むフォルダ：<strong id="folder-label">—</strong></summary>
-      <p class="muted small">ドライブのフォルダを指定すると、その中（4階層下まで）の写真を読み込みます。「写真を追加」「フォルダごと追加」の写真もこのフォルダに保存されます。</p>
+      <p class="muted small">ドライブのフォルダを指定すると、その中（2階層下まで）の写真を読み込みます。「写真を追加」「フォルダごと追加」の写真もこのフォルダに保存されます。</p>
       <p><a id="folder-link" target="_blank" rel="noopener">ドライブで開く</a></p>
       <form id="folder-form" class="row">
         <input name="folder" placeholder="GoogleドライブのフォルダURLまたはID" autocomplete="off">
@@ -292,7 +292,7 @@
       <div class="pe-img"><img alt=""></div>
       <div class="pe-fields">
         <p class="muted small" id="pe-name"></p>
-        <p class="pe-dup" id="pe-dup" hidden><span></span> <button type="button" class="btn small" id="pe-restore">対象に戻す</button></p>
+        <p class="pe-dup" id="pe-dup" hidden><span></span></p>
         <div class="row2">
           <label class="field"><span>撮影日時</span><input name="takenAt" placeholder="2024-08-15 14:30"></label>
           <label class="field"><span>撮影地</span><input name="place" maxlength="80"></label>
@@ -313,6 +313,7 @@
         </div>
         <label class="field"><span>説明</span><textarea name="description" rows="3" maxlength="300"></textarea></label>
         <label class="check-row"><input type="checkbox" name="done"> 解析済みにする（AI解析の対象から外す）</label>
+        <label class="check-row dup-row"><input type="checkbox" name="dup"> 重複として外す（AI解析・テーマ検索・付箋・スライドショーの対象から外す）</label>
         <div class="pe-themes">
           <span class="lbl">入っている付箋</span>
           <div id="pe-theme-chips" class="pe-chips"></div>
@@ -465,7 +466,7 @@
 <div id="busy" class="busy" hidden><div class="busy-card"><span class="spinner" aria-hidden="true"></span><p id="busy-msg"></p></div></div>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
-<script src="config.js?v=1.3.0"></script>
-<script src="app.js?v=1.3.0"></script>
+<script src="config.js?v=1.3.2"></script>
+<script src="app.js?v=1.3.2"></script>
 </body>
 </html>

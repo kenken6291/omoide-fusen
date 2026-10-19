@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — app.js  v1.3.0 */
+/* おもいで付箋ボード — app.js  v1.3.2 */
 (() => {
   'use strict';
 
@@ -1044,7 +1044,7 @@
   }
 
   $('#btn-scan').addEventListener('click', async () => {
-    busy('フォルダの写真を読み込んでいます…（4階層下まで）');
+    busy('フォルダの写真を読み込んでいます…（2階層下まで）');
     try {
       const r = await api('scanFolder');
       setPhotos(r.photos);
@@ -1307,12 +1307,13 @@
     f.elements.namedItem('description').value = p.description || '';
     f.elements.namedItem('done').checked = p.status === 'done';
     f.elements.namedItem('done').disabled = p.status === 'dup';
+    f.elements.namedItem('dup').checked = p.status === 'dup';
     resetMapsPaste(f);
     const dupBox = $('#pe-dup');
     dupBox.hidden = p.status !== 'dup';
     if (p.status === 'dup') {
       const orig = p.dupOf && S.photoMap.get(p.dupOf);
-      dupBox.querySelector('span').textContent = `重複のため対象から外しています${orig ? `（残している写真：${orig.fileName || ''}）` : ''}。`;
+      dupBox.querySelector('span').textContent = `重複のため対象から外しています${orig ? `（残している写真：${orig.fileName || ''}）` : ''}。チェックを外して保存すると対象に戻ります。`;
     }
     $('#pe-name').textContent = p.fileName || '';
   }
@@ -1358,10 +1359,20 @@
     } catch (err) { toast(err.message, 'error'); }
     finally { btn.disabled = false; btn.textContent = 'AIで解析し直す'; }
   });
+  // 「重複として外す」を付けている間は「解析済みにする」を使えなくする
+  $('#dlg-photo form').addEventListener('change', e => {
+    if (e.target.name === 'dup') e.currentTarget.elements.namedItem('done').disabled = e.target.checked;
+  });
   $('#dlg-photo form').addEventListener('submit', async e => {
     e.preventDefault();
-    const f = e.target;
+    const f = e.currentTarget;
     const p = S.photoMap.get(PE.fileId);
+    const wasDup = p.status === 'dup';
+    const wantDup = f.elements.namedItem('dup').checked;
+    if (wantDup && !wasDup) {
+      const inT = S.themes.filter(t => t.photoIds.includes(p.fileId)).length;
+      if (!confirm(`この写真を重複として対象から外しますか？${inT ? `\n入っている付箋（${inT}枚）からも外れます。` : ''}\n（写真ファイルは消えません）`)) return;
+    }
     const takenAt = normDate(f.elements.namedItem('takenAt').value);
     if (takenAt === null) return toast('撮影日時は 2024-08-15 14:30 の形式で入力してください。', 'warn');
     const fields = {
@@ -1369,14 +1380,23 @@
       lat: f.elements.namedItem('lat').value.trim(), lng: f.elements.namedItem('lng').value.trim(),
       tags: splitList(f.elements.namedItem('tags').value),
       scene: f.elements.namedItem('scene').value.trim(), mood: f.elements.namedItem('mood').value.trim(), description: f.elements.namedItem('description').value.trim(),
-      status: p.status === 'dup' ? undefined : (f.elements.namedItem('done').checked ? 'done' : (p.status === 'done' ? 'pending' : p.status)),
+      status: wantDup ? undefined : (f.elements.namedItem('done').checked ? 'done' : 'pending'),
     };
+    if (!wantDup && !wasDup && p.status === 'error' && !f.elements.namedItem('done').checked) fields.status = 'error';
     try {
-      const r = await api('updatePhoto', { fileId: PE.fileId, fields });
-      mergePhotos([r.photo]);
+      if (wasDup && !wantDup) await api('restoreDuplicates', { fileIds: [PE.fileId] });
+      let r = await api('updatePhoto', { fileId: PE.fileId, fields });
+      let photo = r.photo;
+      if (wantDup && !wasDup) {
+        const m = await api('markDuplicates', { items: [{ fileId: PE.fileId, dupOf: '' }] });
+        (m.themes || []).forEach(upsertTheme);
+        photo = (m.photos || [])[0] || photo;
+      }
+      mergePhotos([photo]);
       $('#dlg-photo').close();
-      if (PE.onSaved) PE.onSaved(r.photo);
-      toast('写真の情報を保存しました。');
+      if (PE.onSaved) PE.onSaved(photo);
+      renderPhotoGrid();
+      toast(wantDup && !wasDup ? '重複として対象から外しました。' : (wasDup && !wantDup ? '対象に戻して保存しました。' : '写真の情報を保存しました。'));
     } catch (err) { toast(err.message, 'error'); }
   });
 
@@ -1634,15 +1654,6 @@
       await restoreDups(ids);
       setSelecting(false);
       toast(`${ids.length}枚を対象に戻しました。必要なら付箋に入れ直してください。`);
-    } catch (err) { toast(err.message, 'error'); }
-  });
-  $('#pe-restore').addEventListener('click', async () => {
-    const id = PE.fileId;
-    try {
-      await restoreDups([id]);
-      fillPhotoForm(S.photoMap.get(id));
-      if (PE.onSaved) PE.onSaved(S.photoMap.get(id));
-      toast('対象に戻しました。');
     } catch (err) { toast(err.message, 'error'); }
   });
 

@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — style.css  v1.3.0 */
+/* おもいで付箋ボード — style.css  v1.3.2 */
 
 :root {
   --board: #E9EDF1;
@@ -540,3 +540,7 @@ body.readonly .note { cursor: pointer; }
 .dup-item .nm { display: block; font-size: .72rem; color: var(--ink-soft); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dup-item.out .im { outline-color: transparent; opacity: .4; filter: grayscale(1); }
 .dup-item.out .lb { background: var(--red); }
+
+/* v1.3.2：写真の情報画面の「重複として外す」 */
+.dup-row { color: #8A5A00; margin-top: -6px; }
+.check-row input:disabled + * , .check-row:has(input:disabled) { opacity: .5; }
