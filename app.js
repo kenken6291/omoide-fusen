@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — app.js  v1.0.1 */
+/* おもいで付箋ボード — app.js  v1.1.1 */
 (() => {
   'use strict';
 
@@ -21,6 +21,14 @@
   const NOTE_W = 220, NOTE_H = 280;
   const MIN_SEC = Number(CFG.NARRATION_MIN_SEC) || 6.5;
   const FLIGHT_KM = Number(CFG.FLIGHT_DISTANCE_KM) || 30;
+  const UPLOAD_PARALLEL = Number(CFG.UPLOAD_PARALLEL) || 3;
+  const XLSX_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+  const LEAFLET_JS = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js';
+  const LEAFLET_CSS = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css';
+  /** 閲覧のみのボードで使える操作（サーバー側の READONLY_ACTIONS と同じ） */
+  const RO_ACTIONS = new Set(['bootstrap', 'getImages', 'listComments', 'tts']);
+  /** 閲覧中でも自分のアカウントに対して行う操作 */
+  const ACCOUNT_ACTIONS = new Set(['logout', 'listShares', 'addShare', 'removeShare', 'usage', 'me', 'changePassword']);
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   const S = {
@@ -29,6 +37,8 @@
     photos: [], photoMap: new Map(), themes: [], folder: null,
     view: { x: 40, y: 90, k: 1 },
     tempPassword: '', suggestions: [], menuTheme: null, editTheme: null,
+    viewing: null, readOnly: false,
+    shares: { granted: [], sharedWithMe: [] }, usage: null,
   };
 
   /* ============================================================
@@ -40,16 +50,37 @@
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+  const uniq = a => Array.from(new Set(a));
+  const sameSet = (a, b) => a.length === b.length && a.every(x => b.includes(x));
+  const splitList = s => String(s || '').split(/[、,，\n]+/).map(x => x.trim()).filter(Boolean);
   const gasUrl = () => (localStorage.getItem(KEY.gas) || CFG.GAS_URL || '').trim();
   const voice = () => localStorage.getItem(KEY.voice) || CFG.TTS_VOICE || 'Kore';
   const theme = id => S.themes.find(t => t.themeId === id);
   const photo = id => S.photoMap.get(id) || { fileId: id };
+  const viewKey = () => KEY.view + (S.viewing ? ':' + S.viewing.email : '');
 
   function fmtDate(s) {
     if (!s) return '';
     const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})/);
     if (!m) return '';
     return `${m[1]}年${Number(m[2])}月${Number(m[3])}日`;
+  }
+  function fmtDateTime(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (isNaN(d)) return String(iso);
+    const p = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+  function ymd() { return fmtDateTime(new Date().toISOString()).slice(0, 10).replace(/-/g, ''); }
+  /** 撮影日時の正規化（空なら ''、読めなければ null） */
+  function normDate(s) {
+    s = String(s || '').trim();
+    if (!s) return '';
+    const m = s.match(/^(\d{4})[\/\-年.](\d{1,2})[\/\-月.](\d{1,2})日?(?:[ T]+(\d{1,2}):(\d{2}))?/);
+    if (!m) return null;
+    const p = n => String(n).padStart(2, '0');
+    return `${m[1]}-${p(m[2])}-${p(m[3])}` + (m[4] ? ` ${p(m[4])}:${m[5]}` : '');
   }
   function shuffle(a) {
     for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
@@ -89,6 +120,75 @@
     catch (_) { toast('コピーできませんでした。手動で選択してください。', 'warn'); }
   }
 
+  /* 外部ライブラリは必要になったときだけ読み込む（初回表示を速く） */
+  const loadedScripts = {};
+  function loadScript(src) {
+    if (!loadedScripts[src]) {
+      loadedScripts[src] = new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = src; s.async = true;
+        s.onload = resolve;
+        s.onerror = () => { delete loadedScripts[src]; reject(new Error('ライブラリを読み込めませんでした。通信状態を確認してください。')); };
+        document.head.appendChild(s);
+      });
+    }
+    return loadedScripts[src];
+  }
+  function loadCss(href) {
+    if (document.querySelector(`link[href="${href}"]`)) return;
+    const l = document.createElement('link');
+    l.rel = 'stylesheet'; l.href = href;
+    document.head.appendChild(l);
+  }
+  async function ensureLeaflet() {
+    if (window.L) return;
+    loadCss(LEAFLET_CSS);
+    await loadScript(LEAFLET_JS);
+  }
+
+  /* ============================================================
+   * 画像キャッシュ（IndexedDB：2回目以降はサーバーに取りに行かない）
+   * ============================================================ */
+  const IDB = (() => {
+    let dbp = null;
+    function db() {
+      if (!dbp) {
+        dbp = new Promise(resolve => {
+          try {
+            const r = indexedDB.open('omoide-fusen', 1);
+            r.onupgradeneeded = () => r.result.createObjectStore('img');
+            r.onsuccess = () => resolve(r.result);
+            r.onerror = () => resolve(null);
+          } catch (_) { resolve(null); }
+        });
+      }
+      return dbp;
+    }
+    return {
+      async get(k) {
+        const d = await db();
+        if (!d) return null;
+        return new Promise(resolve => {
+          try {
+            const q = d.transaction('img').objectStore('img').get(k);
+            q.onsuccess = () => resolve(q.result || null);
+            q.onerror = () => resolve(null);
+          } catch (_) { resolve(null); }
+        });
+      },
+      async set(k, v) {
+        const d = await db();
+        if (!d) return;
+        try { d.transaction('img', 'readwrite').objectStore('img').put(v, k); } catch (_) { /* 容量不足は無視 */ }
+      },
+      async clear() {
+        const d = await db();
+        if (!d) return;
+        try { d.transaction('img', 'readwrite').objectStore('img').clear(); } catch (_) { /* noop */ }
+      },
+    };
+  })();
+
   /* ============================================================
    * API
    * ============================================================ */
@@ -98,12 +198,17 @@
       openSettings();
       throw new Error('GASのURLが設定されていません。設定画面で入力してください。');
     }
+    const body = Object.assign({ action, token: S.token }, data);
+    if (S.viewing) {
+      if (RO_ACTIONS.has(action)) body.asOwner = S.viewing.email;
+      else if (!ACCOUNT_ACTIONS.has(action)) throw new Error('閲覧のみのボードでは、この操作はできません。');
+    }
     let res;
     try {
       const r = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(Object.assign({ action, token: S.token }, data)),
+        body: JSON.stringify(body),
       });
       res = await r.json();
     } catch (_) {
@@ -112,34 +217,57 @@
     if (!res.ok) {
       if (res.code === 'AUTH') { clearSession(); showAuth('login'); }
       else if (res.code === 'FIRST_LOGIN') { showAuth('change'); }
+      else if (res.code === 'NOSHARE' && S.viewing) { setTimeout(() => switchBoard(''), 0); }
       throw new Error(res.error || 'エラーが発生しました。');
     }
+    if (res.usage) S.usage = res.usage;
     return res;
   }
 
-  /* 画像ローダー（同時4件・優先キュー付き） */
+  /* 画像ローダー：まとめて取得（サムネ16枚／中6枚／大3枚ずつ）＋ IndexedDB キャッシュ */
   const imgCache = new Map();
-  const imgQueue = [];
-  let imgActive = 0;
+  const imgQueues = { full: [], mid: [], thumb: [] };
+  const imgWaiters = new Map();
+  const IMG_BATCH = { full: 3, mid: 6, thumb: 16 };
+  let imgInflight = 0, imgTimer = null;
   function loadImg(fileId, size = 'thumb', priority = false) {
     const k = fileId + ':' + size;
     if (imgCache.has(k)) return imgCache.get(k);
-    const p = new Promise((resolve, reject) => {
-      const job = { fileId, size, resolve, reject };
-      priority ? imgQueue.unshift(job) : imgQueue.push(job);
-      pumpImg();
-    });
+    const p = IDB.get(k).then(hit => hit || new Promise((resolve, reject) => {
+      imgWaiters.set(k, { resolve, reject });
+      priority ? imgQueues[size].unshift(fileId) : imgQueues[size].push(fileId);
+      if (!imgTimer) imgTimer = setTimeout(() => { imgTimer = null; pumpImg(); }, 25);
+    }));
     imgCache.set(k, p);
     p.catch(() => imgCache.delete(k));
     return p;
   }
   function pumpImg() {
-    while (imgActive < 4 && imgQueue.length) {
-      const j = imgQueue.shift();
-      imgActive++;
-      api('getImage', { fileId: j.fileId, size: j.size })
-        .then(r => j.resolve(r.dataUrl), j.reject)
-        .finally(() => { imgActive--; pumpImg(); });
+    while (imgInflight < 3) {
+      const size = ['full', 'mid', 'thumb'].find(s => imgQueues[s].length);
+      if (!size) return;
+      const ids = uniq(imgQueues[size].splice(0, IMG_BATCH[size]));
+      imgInflight++;
+      api('getImages', { fileIds: ids, size })
+        .then(r => {
+          ids.forEach(id => {
+            const k = id + ':' + size;
+            const w = imgWaiters.get(k);
+            imgWaiters.delete(k);
+            const u = r.images && r.images[id];
+            if (!w) return;
+            if (u) { w.resolve(u); IDB.set(k, u); } else w.reject(new Error('画像を読み込めませんでした'));
+          });
+        })
+        .catch(err => {
+          ids.forEach(id => {
+            const k = id + ':' + size;
+            const w = imgWaiters.get(k);
+            imgWaiters.delete(k);
+            if (w) w.reject(err);
+          });
+        })
+        .finally(() => { imgInflight--; pumpImg(); });
     }
   }
 
@@ -153,13 +281,15 @@
   }
   function saveUser() { localStorage.setItem(KEY.user, JSON.stringify(S.user)); }
   function clearSession() {
-    S.token = ''; S.user = null;
+    S.token = ''; S.user = null; S.viewing = null; S.readOnly = false;
+    document.body.classList.remove('readonly');
     localStorage.removeItem(KEY.token); localStorage.removeItem(KEY.user);
     imgCache.clear();
+    IDB.clear();
   }
 
   function showAuth(panel) {
-    closeViewer(); closeDrawer(); hideMenu();
+    closeViewer(); closeLibrary(); hideMenu();
     $('#app').hidden = true; $('#auth').hidden = false;
     $$('#auth [data-panel]').forEach(p => { p.hidden = p.dataset.panel !== panel; });
     if (panel === 'change') $('[data-form="change"] [name="currentPassword"]').value = S.tempPassword || '';
@@ -186,11 +316,11 @@
 
   const authHandlers = {
     async login(f) {
-      const email = f.email.value.trim(), password = f.password.value;
+      const email = f.elements.namedItem('email').value.trim(), password = f.elements.namedItem('password').value;
       if (!email || !password) throw new Error('メールアドレスとパスワードを入力してください。');
       const r = await api('login', { email, password });
       setSession(r.token, r.user);
-      f.password.value = '';
+      f.elements.namedItem('password').value = '';
       if (r.user.isFirstLogin) {
         S.tempPassword = password;
         showAuth('change');
@@ -200,7 +330,7 @@
       }
     },
     async register(f) {
-      const email = f.email.value.trim(), nickname = f.nickname.value.trim();
+      const email = f.elements.namedItem('email').value.trim(), nickname = f.elements.namedItem('nickname').value.trim();
       if (!email || !nickname) throw new Error('メールアドレスとニックネームを入力してください。');
       const r = await api('register', { email, nickname });
       $('#reg-msg').textContent = r.message;
@@ -211,7 +341,7 @@
       showAuth('registered');
     },
     async forgot(f) {
-      const email = f.email.value.trim();
+      const email = f.elements.namedItem('email').value.trim();
       if (!email) throw new Error('メールアドレスを入力してください。');
       const r = await api('forgotPassword', { email });
       $('[data-form="login"] [name="email"]').value = email;
@@ -220,7 +350,7 @@
       toast(r.message);
     },
     async change(f) {
-      const cur = f.currentPassword.value, nw = f.newPassword.value, cf = f.confirmPassword.value;
+      const cur = f.elements.namedItem('currentPassword').value, nw = f.elements.namedItem('newPassword').value, cf = f.elements.namedItem('confirmPassword').value;
       if (nw !== cf) throw new Error('確認用のパスワードが一致しません。');
       if (!/^(?=.*[A-Za-z])(?=.*\d).{8,64}$/.test(nw)) throw new Error('新しいパスワードは8文字以上で、英字と数字を両方含めてください。');
       await api('changePassword', { currentPassword: cur, newPassword: nw });
@@ -243,31 +373,38 @@
   async function logout() {
     try { await api('logout'); } catch (_) { /* 期限切れでも続行 */ }
     clearSession();
-    $('#dlg-settings').open && $('#dlg-settings').close();
+    if ($('#dlg-settings').open) $('#dlg-settings').close();
     showAuth('login');
     toast('ログアウトしました。');
   }
   document.addEventListener('click', e => {
     if (e.target.closest('[data-action="logout"]')) logout();
     if (e.target.closest('[data-open-settings]')) openSettings();
-    if (e.target.closest('[data-open-drawer]')) openDrawer();
+    if (e.target.closest('[data-open-library]')) openLibrary();
   });
 
   /* ============================================================
-   * アプリ起動
+   * 起動・ボード読み込み
    * ============================================================ */
   async function enterApp() {
     $('#auth').hidden = true; $('#app').hidden = false;
+    await loadBoard();
+  }
+  async function loadBoard() {
     loadView(); applyView();
-    busy('ボードを読み込んでいます…');
+    busy(S.viewing ? `${S.viewing.nickname || S.viewing.email} さんのボードを読み込んでいます…` : 'ボードを読み込んでいます…');
     try {
-      const [me, th, ph] = await Promise.all([api('me'), api('listThemes'), api('listPhotos')]);
-      S.user = Object.assign({}, S.user, me.user); saveUser();
-      S.folder = me.folder;
-      S.themes = th.themes;
-      setPhotos(ph.photos);
+      const r = await api('bootstrap');
+      if (!S.viewing) {
+        S.user = Object.assign({}, S.user, r.user); saveUser();
+        S.folder = r.folder;
+        S.shares = r.shares || S.shares;
+        renderBoardSwitch();
+      }
+      S.themes = r.themes;
+      setPhotos(r.photos);
       renderBoard();
-      if (!localStorage.getItem(KEY.view) && S.themes.length) fitView();
+      if (!localStorage.getItem(viewKey()) && S.themes.length) fitView();
     } catch (e) {
       toast(e.message, 'error');
     } finally {
@@ -275,10 +412,32 @@
     }
   }
 
+  /* 閲覧を許可されたボードへの切り替え */
+  function renderBoardSwitch() {
+    const list = S.shares.sharedWithMe || [];
+    $('#board-switch-wrap').hidden = !list.length;
+    $('#board-switch').innerHTML = '<option value="">自分のボード</option>' +
+      list.map(o => `<option value="${esc(o.email)}">${esc(o.nickname || o.email)} さんのボード（閲覧のみ）</option>`).join('');
+    $('#board-switch').value = S.viewing ? S.viewing.email : '';
+  }
+  $('#board-switch').addEventListener('change', e => switchBoard(e.target.value));
+  async function switchBoard(email) {
+    closeViewer(); closeLibrary(); hideMenu();
+    const o = (S.shares.sharedWithMe || []).find(x => x.email === email);
+    S.viewing = email && o ? o : null;
+    S.readOnly = !!S.viewing;
+    document.body.classList.toggle('readonly', S.readOnly);
+    const banner = $('#readonly-banner');
+    banner.hidden = !S.readOnly;
+    if (S.readOnly) banner.textContent = `${S.viewing.nickname || S.viewing.email} さんのボードを見ています（閲覧のみ）`;
+    $('#board-switch').value = S.viewing ? S.viewing.email : '';
+    await loadBoard();
+  }
+
   function setPhotos(list) {
     S.photos = list;
     S.photoMap = new Map(list.map(p => [p.fileId, p]));
-    updatePhotoStats();
+    updatePhotoCount();
   }
   function mergePhotos(list) {
     list.forEach(p => {
@@ -286,18 +445,15 @@
       if (i >= 0) S.photos[i] = p; else S.photos.push(p);
       S.photoMap.set(p.fileId, p);
     });
-    updatePhotoStats();
+    updatePhotoCount();
   }
-  function updatePhotoStats() {
-    const n = S.photos.length;
-    const done = S.photos.filter(p => p.status === 'done').length;
-    const err = S.photos.filter(p => p.status === 'error').length;
-    $('#photo-count').textContent = n;
-    $('#photo-stats').textContent = n
-      ? `全${n}枚（解析済み ${done} ／ 未解析 ${n - done - err}${err ? ` ／ エラー ${err}` : ''}）`
-      : 'まだ写真がありません。フォルダを読み込むか、写真を追加してください。';
-  }
+  function updatePhotoCount() { $('#photo-count').textContent = S.photos.length; }
   const analyzedCount = () => S.photos.filter(p => p.status === 'done').length;
+  function membershipCount() {
+    const m = new Map();
+    S.themes.forEach(t => t.photoIds.forEach(id => m.set(id, (m.get(id) || 0) + 1)));
+    return m;
+  }
 
   /* ============================================================
    * ボード（付箋・パン・ズーム）
@@ -312,6 +468,7 @@
   }
   function noteEl(t) {
     const el = document.createElement('article');
+    const count = t.photoIds.filter(id => S.photoMap.has(id)).length;
     el.className = 'note';
     el.dataset.id = t.themeId;
     el.style.left = t.x + 'px';
@@ -319,13 +476,13 @@
     el.style.setProperty('--c', t.color || COLORS[0].v);
     el.style.setProperty('--r', tilt(t.themeId) + 'deg');
     el.tabIndex = 0;
-    el.setAttribute('aria-label', `${t.title}（${t.photoIds.length}枚）`);
+    el.setAttribute('aria-label', `${t.title}（${count}枚）`);
     el.innerHTML = `
       <div class="note-photo"><img alt="" draggable="false"></div>
       <h3 class="note-title">${esc(t.title)}</h3>
-      <span class="note-count">${t.photoIds.length}枚</span>
+      <span class="note-count">${count}枚</span>
       <button class="note-menu-btn" aria-label="${esc(t.title)}のメニュー">⋯</button>`;
-    const cover = t.coverFileId || t.photoIds[0];
+    const cover = S.photoMap.has(t.coverFileId) ? t.coverFileId : t.photoIds.find(id => S.photoMap.has(id));
     const box = el.querySelector('.note-photo');
     if (cover) {
       loadImg(cover, 'thumb').then(u => { box.querySelector('img').src = u; box.classList.add('loaded'); }).catch(() => box.classList.add('empty'));
@@ -337,7 +494,7 @@
   function renderBoard() {
     boardEl.innerHTML = '';
     S.themes.forEach(t => boardEl.appendChild(noteEl(t)));
-    $('#board-empty').hidden = S.themes.length > 0;
+    $('#board-empty').hidden = S.themes.length > 0 || S.readOnly;
   }
   function replaceNote(t) {
     const old = boardEl.querySelector(`.note[data-id="${t.themeId}"]`);
@@ -360,11 +517,12 @@
   let viewTimer;
   function saveView() {
     clearTimeout(viewTimer);
-    viewTimer = setTimeout(() => localStorage.setItem(KEY.view, JSON.stringify(S.view)), 300);
+    const key = viewKey();
+    viewTimer = setTimeout(() => localStorage.setItem(key, JSON.stringify(S.view)), 300);
   }
   function loadView() {
-    const v = parseJson(localStorage.getItem(KEY.view));
-    if (v && isFinite(v.x) && isFinite(v.y) && isFinite(v.k)) S.view = v;
+    const v = parseJson(localStorage.getItem(viewKey()));
+    S.view = (v && isFinite(v.x) && isFinite(v.y) && isFinite(v.k)) ? v : { x: 40, y: 90, k: 1 };
   }
   function zoomAt(px, py, k) {
     k = clamp(k, 0.25, 2.5);
@@ -409,13 +567,13 @@
     }
     if (pointers.size > 2) return;
     const note = e.target.closest('.note');
-    if (note) {
+    if (note && !S.readOnly) {
       const t = theme(note.dataset.id);
       gesture = { type: 'note', el: note, t, sx: e.clientX, sy: e.clientY, ox: t.x, oy: t.y, moved: false };
       note.classList.add('dragging');
       boardEl.appendChild(note);
     } else {
-      gesture = { type: 'pan', sx: e.clientX, sy: e.clientY, v0: Object.assign({}, S.view), moved: false };
+      gesture = { type: 'pan', sx: e.clientX, sy: e.clientY, v0: Object.assign({}, S.view), moved: false, note };
       vp.classList.add('panning');
     }
   });
@@ -438,7 +596,7 @@
       gesture.el.style.top = gesture.t.y + 'px';
     } else if (gesture.type === 'pan') {
       const dx = e.clientX - gesture.sx, dy = e.clientY - gesture.sy;
-      if (Math.abs(dx) + Math.abs(dy) > 3) gesture.moved = true;
+      if (Math.abs(dx) + Math.abs(dy) > 4) gesture.moved = true;
       S.view = { k: gesture.v0.k, x: gesture.v0.x + dx, y: gesture.v0.y + dy };
       applyView();
     }
@@ -456,6 +614,7 @@
       if (pointers.size < 2) { gesture = null; saveView(); }
     } else {
       vp.classList.remove('panning');
+      if (!gesture.moved && gesture.note && e.type === 'pointerup') openViewer(theme(gesture.note.dataset.id));
       gesture = null; saveView();
     }
   }
@@ -490,10 +649,9 @@
   const menu = $('#note-menu');
   boardEl.addEventListener('click', e => {
     const btn = e.target.closest('.note-menu-btn');
-    if (!btn) return;
+    if (!btn || S.readOnly) return;
     e.stopPropagation();
-    const t = theme(btn.closest('.note').dataset.id);
-    S.menuTheme = t;
+    S.menuTheme = theme(btn.closest('.note').dataset.id);
     const r = btn.getBoundingClientRect();
     menu.hidden = false;
     const mw = menu.offsetWidth, mh = menu.offsetHeight;
@@ -512,6 +670,7 @@
     if (!t) return;
     const act = b.dataset.act;
     if (act === 'open') return openViewer(t);
+    if (act === 'organize') return openOrganize(t);
     if (act === 'edit') return openEdit(t);
     if (act === 'earth') return openEarth(t);
     if (act === 'delete') {
@@ -525,11 +684,11 @@
       return;
     }
     if (act === 'refresh') {
-      busy('AIが写真を探し直しています…');
+      busy('写真を探し直しています…');
       try {
-        const r = await api('refreshTheme', { themeId: t.themeId });
+        const r = await api('refreshTheme', { themeId: t.themeId, mode: 'auto' });
         upsertTheme(r.theme);
-        toast(`${r.matched}枚の写真が見つかりました。`);
+        toast(`${r.matched}枚の写真が見つかりました（${r.method === 'ai' ? 'AIで検索' : 'キーワードで検索・AI不使用'}）。外した写真は戻していません。`);
       } catch (err) { toast(err.message, 'error'); } finally { busy(false); }
       return;
     }
@@ -552,6 +711,14 @@
     box.innerHTML = COLORS.map((c, i) => `
       <label title="${c.n}"><input type="radio" name="color" value="${c.v}" ${(current ? c.v === current : i === 0) ? 'checked' : ''} aria-label="${c.n}"><span style="--c:${c.v}"></span></label>`).join('');
   }
+  const nextColor = () => COLORS[S.themes.length % COLORS.length].v;
+  function newNotePos(i = 0, cols = 1) {
+    const c = viewCenterWorld();
+    return {
+      x: Math.round(c.x - NOTE_W / 2 + (i % cols) * 260 + (Math.random() * 40 - 20)),
+      y: Math.round(c.y - NOTE_H / 2 + Math.floor(i / cols) * 310 + (Math.random() * 40 - 20)),
+    };
+  }
 
   /* テーマを作る */
   $('#preset-chips').innerHTML = PRESETS.map(p => `<button type="button">${esc(p)}</button>`).join('');
@@ -560,29 +727,25 @@
     if (b) $('#dlg-new [name=title]').value = b.textContent;
   });
   $('#btn-new').addEventListener('click', () => {
-    if (!analyzedCount()) { toast('先に写真をAIで解析してください。', 'warn'); openDrawer(); return; }
-    const f = $('#dlg-new form');
-    f.reset();
-    renderSwatches('new', COLORS[S.themes.length % COLORS.length].v);
+    if (!S.photos.length) { toast('先に写真を用意してください。', 'warn'); openLibrary(); return; }
+    $('#dlg-new form').reset();
+    renderSwatches('new', nextColor());
     $('#dlg-new').showModal();
   });
   $('#dlg-new form').addEventListener('submit', async e => {
     e.preventDefault();
     const f = e.target;
-    const title = f.title.value.trim();
+    const title = f.elements.namedItem('title').value.trim();
     if (!title) return toast('テーマを入力してください。', 'warn');
     const color = (f.querySelector('[name=color]:checked') || {}).value;
-    const c = viewCenterWorld();
+    const mode = (f.querySelector('[name=mode]:checked') || {}).value || 'auto';
     $('#dlg-new').close();
-    busy(`「${title}」に合う写真をAIが探しています…`);
+    busy(`「${title}」に合う写真を探しています…`);
     try {
-      const r = await api('createTheme', {
-        title, color,
-        x: Math.round(c.x - NOTE_W / 2 + (Math.random() * 60 - 30)),
-        y: Math.round(c.y - NOTE_H / 2 + (Math.random() * 60 - 30)),
-      });
+      const r = await api('createTheme', Object.assign({ title, color, mode }, newNotePos()));
       upsertTheme(r.theme);
-      toast(r.matched ? `${r.matched}枚の写真で付箋を貼りました。` : '合う写真が見つかりませんでした。別の言葉で試してみてください。', r.matched ? 'info' : 'warn');
+      const how = r.method === 'ai' ? 'AIで検索' : 'キーワードで検索・AI不使用';
+      toast(r.matched ? `${r.matched}枚の写真で付箋を貼りました（${how}）。` : `合う写真が見つかりませんでした（${how}）。別の言葉か「AIで探す」を試してください。`, r.matched ? 'info' : 'warn');
     } catch (err) { toast(err.message, 'error'); } finally { busy(false); }
   });
 
@@ -590,14 +753,14 @@
   function openEdit(t) {
     S.editTheme = t;
     const f = $('#dlg-edit form');
-    f.title.value = t.title;
+    f.elements.namedItem('title').value = t.title;
     renderSwatches('edit', t.color);
     $('#dlg-edit').showModal();
   }
   $('#dlg-edit form').addEventListener('submit', async e => {
     e.preventDefault();
     const t = S.editTheme, f = e.target;
-    const title = f.title.value.trim();
+    const title = f.elements.namedItem('title').value.trim();
     const color = (f.querySelector('[name=color]:checked') || {}).value;
     if (!title) return toast('テーマを入力してください。', 'warn');
     try {
@@ -608,9 +771,64 @@
     } catch (err) { toast(err.message, 'error'); }
   });
 
+  /* 写真を整理する（関係ない写真を外す・表紙を選ぶ） */
+  let ORG = null;
+  function openOrganize(t) {
+    const ids = t.photoIds.filter(id => S.photoMap.has(id));
+    ORG = { t, ids, out: new Set(), cover: ids.includes(t.coverFileId) ? t.coverFileId : (ids[0] || '') };
+    $('#org-title').textContent = `「${t.title}」の写真を整理する`;
+    const grid = $('#org-grid');
+    grid.innerHTML = ids.length ? ids.map(id => `
+      <div class="org-item${id === ORG.cover ? ' cover' : ''}" data-file="${esc(id)}">
+        <img alt="">
+        <button type="button" class="cover-btn" aria-label="表紙にする">★</button>
+        <button type="button" class="out-btn">外す</button>
+      </div>`).join('') : '<p class="muted">写真がありません。</p>';
+    $$('.org-item', grid).forEach(el => loadImg(el.dataset.file, 'thumb').then(u => { el.querySelector('img').src = u; }).catch(() => {}));
+    updateOrgCount();
+    $('#dlg-organize').showModal();
+  }
+  function updateOrgCount() {
+    $('#org-count').textContent = `${ORG.ids.length}枚中 ${ORG.out.size}枚を外します。`;
+  }
+  $('#org-grid').addEventListener('click', e => {
+    const item = e.target.closest('.org-item');
+    if (!item || !ORG) return;
+    const id = item.dataset.file;
+    if (e.target.closest('.cover-btn')) {
+      ORG.cover = id;
+      ORG.out.delete(id);
+      $$('.org-item', $('#org-grid')).forEach(el => el.classList.toggle('cover', el.dataset.file === id));
+      item.classList.remove('out');
+      item.querySelector('.out-btn').textContent = '外す';
+    } else {
+      const out = !ORG.out.has(id);
+      out ? ORG.out.add(id) : ORG.out.delete(id);
+      item.classList.toggle('out', out);
+      item.querySelector('.out-btn').textContent = out ? '戻す' : '外す';
+    }
+    updateOrgCount();
+  });
+  $('#dlg-organize form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const t = ORG.t;
+    const keep = ORG.ids.filter(id => !ORG.out.has(id));
+    const cover = keep.includes(ORG.cover) ? ORG.cover : (keep[0] || '');
+    if (!ORG.out.size && cover === t.coverFileId && keep.length === t.photoIds.length) { $('#dlg-organize').close(); return; }
+    try {
+      const r = await api('updateTheme', {
+        themeId: t.themeId,
+        fields: { photoIds: keep, excludedIds: uniq((t.excludedIds || []).concat([...ORG.out])), coverFileId: cover },
+      });
+      upsertTheme(r.theme);
+      $('#dlg-organize').close();
+      toast(ORG.out.size ? `${ORG.out.size}枚を付箋から外しました。` : '保存しました。');
+    } catch (err) { toast(err.message, 'error'); }
+  });
+
   /* AIにテーマを提案してもらう */
   $('#btn-suggest').addEventListener('click', async () => {
-    if (analyzedCount() < 3) { toast('解析済みの写真が3枚以上必要です。', 'warn'); openDrawer(); return; }
+    if (analyzedCount() < 3) { toast('解析済みの写真が3枚以上必要です。', 'warn'); openLibrary(); return; }
     busy('AIが写真を見比べて、テーマを考えています…');
     let r;
     try { r = await api('suggestThemes'); }
@@ -639,19 +857,15 @@
     });
     if (!picks.length) return toast('テーマを1つ以上選んでください。', 'warn');
     $('#dlg-suggest').close();
-    const c = viewCenterWorld();
     const cols = Math.min(4, picks.length);
-    const startX = c.x - (cols * 260) / 2, startY = c.y - NOTE_H / 2 - (Math.ceil(picks.length / cols) - 1) * 150;
     let added = 0;
     for (let i = 0; i < picks.length; i++) {
       busy(`付箋を貼っています… ${i + 1} / ${picks.length}`);
       const p = picks[i];
       try {
-        const r = await api('createTheme', {
-          title: p.title, photoIds: p.photoIds, coverFileId: p.coverFileId,
-          color: COLORS[(S.themes.length) % COLORS.length].v,
-          x: Math.round(startX + (i % cols) * 260), y: Math.round(startY + Math.floor(i / cols) * 310),
-        });
+        const r = await api('createTheme', Object.assign({
+          title: p.title, photoIds: p.photoIds, coverFileId: p.coverFileId, color: nextColor(),
+        }, newNotePos(i, cols)));
         upsertTheme(r.theme);
         added++;
       } catch (err) { toast(err.message, 'error'); }
@@ -677,7 +891,7 @@
         <span class="acts"><a class="link" href="${link}" target="_blank" rel="noopener">Google Earthで見る</a><button type="button" class="link" data-copy="${coord}">座標をコピー</button></span>
         <span class="muted">${esc(fmtDate(p.takenAt))}　緯度 ${p.lat.toFixed(5)} ／ 経度 ${p.lng.toFixed(5)}</span>
       </li>`;
-    }).join('') : '<li class="muted">位置情報つきの写真がありません。スマートフォンの位置情報をオンにして撮った写真で表示されます。</li>';
+    }).join('') : '<li class="muted">位置情報つきの写真がありません。写真の情報で緯度・経度を入れると表示されます。</li>';
     $('#dlg-earth [name=earthVideoUrl]').value = t.earthVideoUrl || '';
     $('#dlg-earth').showModal();
   }
@@ -689,30 +903,55 @@
     e.preventDefault();
     const t = S.editTheme;
     try {
-      const r = await api('updateTheme', { themeId: t.themeId, fields: { earthVideoUrl: e.target.earthVideoUrl.value.trim() } });
+      const r = await api('updateTheme', { themeId: t.themeId, fields: { earthVideoUrl: e.target.elements.namedItem('earthVideoUrl').value.trim() } });
       upsertTheme(r.theme);
       $('#dlg-earth').close();
       toast('映像を保存しました。走馬灯の最初に流れます。');
     } catch (err) { toast(err.message, 'error'); }
   });
 
-  /* 設定 */
+  /* ============================================================
+   * 設定（AI利用状況・閲覧の許可）
+   * ============================================================ */
   const voiceSel = $('#dlg-settings [name=voice]');
   voiceSel.innerHTML = VOICES.map(v => `<option value="${v.v}">${esc(v.n)}</option>`).join('');
-  function openSettings() {
+  function renderUsage() {
+    const u = S.usage;
+    if (!u) { $('#usage-text').textContent = '—'; return; }
+    const used = (u.t || 0) + (u.i || 0) + (u.s || 0);
+    $('#usage-text').textContent =
+      `文章 ${u.t || 0}回 ／ 画像解析 ${u.i || 0}枚 ／ 音声生成 ${u.s || 0}回（保存済み音声の再利用 ${u.c || 0}回）` +
+      (u.limit > 0 ? `　上限 ${u.limit}回のうち残り ${Math.max(0, u.limit - used)}回` : '　上限なし');
+  }
+  function renderShares() {
+    const list = S.shares.granted || [];
+    $('#share-list').innerHTML = list.length ? list.map(s => `
+      <li><span>${esc(s.nickname || '（未登録）')}　<span class="muted small">${esc(s.email)}</span></span>
+      <button type="button" class="link danger" data-unshare="${esc(s.email)}">やめる</button></li>`).join('')
+      : '<li class="empty">まだ誰にも許可していません。</li>';
+  }
+  async function openSettings() {
     const d = $('#dlg-settings');
     if (d.open) return;
     d.querySelector('[name=gasUrl]').value = localStorage.getItem(KEY.gas) || '';
     d.querySelector('[name=gasUrl]').placeholder = CFG.GAS_URL || 'https://script.google.com/macros/s/…/exec';
     voiceSel.value = voice();
-    const acc = $('#settings-account');
-    acc.hidden = !S.user;
-    if (S.user) { $('#acc-name').textContent = S.user.nickname || ''; $('#acc-email').textContent = S.user.email || ''; }
+    const member = !!(S.token && S.user && !S.user.isFirstLogin);
+    $('#settings-member').hidden = !member;
+    if (member) {
+      $('#acc-name').textContent = S.user.nickname || '';
+      $('#acc-email').textContent = S.user.email || '';
+      renderUsage(); renderShares();
+    }
     d.showModal();
+    if (member) {
+      api('usage').then(r => { S.usage = r.usage; renderUsage(); }).catch(() => {});
+      api('listShares').then(r => { S.shares = r; renderShares(); renderBoardSwitch(); }).catch(() => {});
+    }
   }
   $('#dlg-settings form').addEventListener('submit', e => {
     e.preventDefault();
-    const url = e.target.gasUrl.value.trim();
+    const url = e.target.elements.namedItem('gasUrl').value.trim();
     if (url && !/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url)) {
       return toast('URLは https://script.google.com/macros/s/…/exec の形式で入力してください。', 'warn');
     }
@@ -722,42 +961,71 @@
     toast('設定を保存しました。');
   });
   $('#btn-test').addEventListener('click', async () => {
-    const input = $('#dlg-settings [name=gasUrl]').value.trim();
-    const url = input || CFG.GAS_URL;
+    const url = $('#dlg-settings [name=gasUrl]').value.trim() || CFG.GAS_URL;
     try {
       const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ action: 'ping' }) });
       const j = await r.json();
       toast(j.ok ? `接続できました（サーバー v${j.version}）。` : 'サーバーから応答はありましたが、エラーでした。', j.ok ? 'info' : 'warn');
     } catch (_) { toast('接続できませんでした。URLとデプロイ設定を確認してください。', 'error'); }
   });
+  $('#btn-clear-cache').addEventListener('click', async () => {
+    await IDB.clear();
+    imgCache.clear();
+    toast('画像キャッシュを消しました。');
+  });
+  $('#share-add').addEventListener('click', async () => {
+    const email = $('#share-email').value.trim();
+    if (!email) return toast('メールアドレスを入力してください。', 'warn');
+    try {
+      const r = await api('addShare', { email });
+      S.shares = r.shares;
+      renderShares();
+      $('#share-email').value = '';
+      toast(r.registered ? '閲覧を許可し、お知らせメールを送りました。' : 'まだ未登録の方です。このメールアドレスで登録すると見られるようになります（お知らせメールを送りました）。');
+    } catch (err) { toast(err.message, 'error'); }
+  });
+  $('#share-list').addEventListener('click', async e => {
+    const b = e.target.closest('[data-unshare]');
+    if (!b || !confirm(`${b.dataset.unshare} さんへの閲覧の許可をやめますか？`)) return;
+    try {
+      const r = await api('removeShare', { email: b.dataset.unshare });
+      S.shares = r.shares;
+      renderShares();
+    } catch (err) { toast(err.message, 'error'); }
+  });
 
   /* ============================================================
-   * 写真ドロワー
+   * 写真ライブラリ
    * ============================================================ */
-  const drawer = $('#drawer');
+  const lib = $('#library');
+  const LIB = { selecting: false, selected: new Set(), q: '', filter: 'all' };
   let gridObserver;
-  $('#btn-photos').addEventListener('click', openDrawer);
-  $('[data-close-drawer]').addEventListener('click', closeDrawer);
-  function openDrawer() {
-    if (!S.token) return;
-    drawer.classList.add('open');
-    drawer.setAttribute('aria-hidden', 'false');
+  $('#btn-photos').addEventListener('click', openLibrary);
+  $('[data-close-library]').addEventListener('click', closeLibrary);
+  function openLibrary() {
+    if (!S.token || S.readOnly) return;
+    lib.hidden = false;
+    document.body.classList.add('lock');
     renderFolder();
     renderPhotoGrid();
   }
-  function closeDrawer() {
-    drawer.classList.remove('open');
-    drawer.setAttribute('aria-hidden', 'true');
+  function closeLibrary() {
+    if (lib.hidden) return;
+    lib.hidden = true;
+    document.body.classList.remove('lock');
+    setSelecting(false, true);
+    renderBoard();
   }
   function renderFolder() {
-    const a = $('#folder-link'), f = S.folder;
-    a.textContent = f ? (f.error ? f.error : (f.name || '—') + (f.isHome ? '（アップロード先）' : '')) : '—';
+    const f = S.folder;
+    $('#folder-label').textContent = f ? (f.error || ((f.name || '—') + (f.isHome ? '（最初のフォルダ）' : ''))) : '—';
+    const a = $('#folder-link');
     if (f && f.url) a.href = f.url; else a.removeAttribute('href');
     $('#folder-home').hidden = !f || f.isHome;
   }
   $('#folder-form').addEventListener('submit', async e => {
     e.preventDefault();
-    const v = e.target.folder.value.trim();
+    const v = e.target.elements.namedItem('folder').value.trim();
     if (!v) return toast('フォルダのURLまたはIDを入力してください。', 'warn');
     await changeFolder(v);
     e.target.reset();
@@ -774,7 +1042,7 @@
   }
 
   $('#btn-scan').addEventListener('click', async () => {
-    busy('フォルダの写真を読み込んでいます…');
+    busy('フォルダの写真を読み込んでいます…（4階層下まで）');
     try {
       const r = await api('scanFolder');
       setPhotos(r.photos);
@@ -792,53 +1060,86 @@
     p.querySelector('i').style.width = Math.round(clamp(ratio, 0, 1) * 100) + '%';
     p.querySelector('p').textContent = text;
   }
-  function drawerBusy(on) { ['#btn-scan', '#btn-analyze', '#file-input'].forEach(s => { $(s).disabled = on; }); }
+  function libBusy(on) {
+    ['#btn-scan', '#btn-analyze', '#file-input', '#dir-input', '#sel-analyze', '#sel-to-theme', '#excel-in', '#btn-excel-out']
+      .forEach(s => { $(s).disabled = on; });
+  }
 
-  $('#btn-analyze').addEventListener('click', async () => {
-    let pending = S.photos.filter(p => p.status === 'pending' || !p.status).length;
-    let retryErrors = false;
-    if (!pending) {
-      const errs = S.photos.filter(p => p.status === 'error').length;
-      if (errs && confirm(`解析できなかった写真が${errs}枚あります。もう一度解析しますか？`)) { retryErrors = true; pending = errs; }
-      else { toast(S.photos.length ? 'すべて解析済みです。' : '先に写真を読み込んでください。'); return; }
-    }
-    stopFlag = false; drawerBusy(true);
+  /* AI解析（未解析のみ。1回のサーバー呼び出しで8枚、Geminiへは4枚ずつまとめて送る） */
+  async function runAnalyze(opts) {
+    stopFlag = false; libBusy(true);
     let done = 0;
-    progress(true, 0, `解析中… 0 / ${pending}`);
+    const total = opts.total;
+    progress(true, 0, `解析中… 0 / ${total}`);
     try {
-      while (!stopFlag) {
-        const r = await api('analyzeBatch', { limit: 3, retryErrors });
-        mergePhotos(r.photos || []);
-        done += r.processed;
-        progress(true, done / pending, `解析中… ${Math.min(done, pending)} / ${pending}`);
-        renderPhotoGrid();
-        if (!r.remaining || !r.processed) break;
+      if (opts.fileIds) {
+        for (let i = 0; i < opts.fileIds.length && !stopFlag; i += 8) {
+          const r = await api('analyzeBatch', { fileIds: opts.fileIds.slice(i, i + 8), limit: 8 });
+          mergePhotos(r.photos || []);
+          done += r.processed;
+          progress(true, done / total, `解析中… ${Math.min(done, total)} / ${total}`);
+          renderPhotoGrid();
+        }
+      } else {
+        while (!stopFlag) {
+          const r = await api('analyzeBatch', { limit: 8, retryErrors: opts.retryErrors });
+          mergePhotos(r.photos || []);
+          done += r.processed;
+          progress(true, done / total, `解析中… ${Math.min(done, total)} / ${total}`);
+          renderPhotoGrid();
+          if (!r.remaining || !r.processed) break;
+        }
       }
-      toast(stopFlag ? '解析を止めました。続きはもう一度「AIで解析する」を押してください。' : '解析が終わりました。「テーマを作る」で付箋を貼れます。');
+      toast(stopFlag ? '解析を止めました。続きはもう一度「AIで解析する」を押してください。' : '解析が終わりました。');
     } catch (err) { toast(err.message, 'error'); }
-    finally { progress(false); drawerBusy(false); }
+    finally { progress(false); libBusy(false); }
+  }
+  $('#btn-analyze').addEventListener('click', () => {
+    const pending = S.photos.filter(p => (p.status || 'pending') === 'pending').length;
+    if (pending) return runAnalyze({ total: pending });
+    const errs = S.photos.filter(p => p.status === 'error').length;
+    if (errs && confirm(`解析できなかった写真が${errs}枚あります。もう一度解析しますか？`)) return runAnalyze({ total: errs, retryErrors: true });
+    toast(S.photos.length ? 'すべて解析済みです。' : '先に写真を用意してください。');
   });
 
-  $('#file-input').addEventListener('change', async e => {
-    const files = [...e.target.files].filter(f => /^image\//.test(f.type) || /\.(heic|heif)$/i.test(f.name));
-    e.target.value = '';
-    if (!files.length) return;
-    stopFlag = false; drawerBusy(true);
-    let ok = 0;
-    try {
-      for (let i = 0; i < files.length && !stopFlag; i++) {
-        const f = files[i];
-        progress(true, i / files.length, `アップロード中… ${i + 1} / ${files.length}`);
-        if (f.size > 15 * 1024 * 1024) { toast(`${f.name} は15MBを超えるため追加できません。`, 'warn'); continue; }
-        const data = await fileToBase64(f);
-        const r = await api('uploadPhoto', { fileName: f.name, mimeType: f.type || 'image/heic', data });
-        mergePhotos([r.photo]);
-        ok++;
+  /* 写真の追加（複数枚・フォルダごと、並列アップロード） */
+  $('#file-input').addEventListener('change', e => { const f = [...e.target.files]; e.target.value = ''; uploadFiles(f, false); });
+  $('#dir-input').addEventListener('change', e => { const f = [...e.target.files]; e.target.value = ''; uploadFiles(f, true); });
+  async function uploadFiles(files, withPath) {
+    let list = files.filter(f => /^image\//.test(f.type) || /\.(heic|heif)$/i.test(f.name));
+    if (!list.length) return toast('画像ファイルがありませんでした。', 'warn');
+    const big = list.filter(f => f.size > 15 * 1024 * 1024);
+    list = list.filter(f => f.size <= 15 * 1024 * 1024);
+    if (big.length) toast(`15MBを超える${big.length}枚は追加できません。`, 'warn');
+    const names = new Set(S.photos.map(p => p.fileName));
+    const dup = list.filter(f => names.has(f.name));
+    if (dup.length && confirm(`同じファイル名の写真が${dup.length}枚あります。重なっている分は飛ばしますか？\n（「キャンセル」ですべて追加します）`)) {
+      list = list.filter(f => !names.has(f.name));
+    }
+    if (!list.length) return;
+    const folders = withPath ? uniq(list.map(f => (f.webkitRelativePath || '').split('/').slice(0, -1).join('/')).filter(Boolean)) : [];
+    stopFlag = false; libBusy(true);
+    let idx = 0, done = 0, ok = 0, fail = 0;
+    progress(true, 0, `アップロード中… 0 / ${list.length}`);
+    const worker = async () => {
+      while (!stopFlag && idx < list.length) {
+        const f = list[idx++];
+        try {
+          const data = await fileToBase64(f);
+          const subPath = withPath ? (f.webkitRelativePath || '').split('/').slice(0, -1).join('/') : '';
+          const r = await api('uploadPhoto', { fileName: f.name, mimeType: f.type || 'image/heic', data, subPath });
+          mergePhotos([r.photo]);
+          ok++;
+        } catch (err) { fail++; console.warn(f.name, err); }
+        done++;
+        progress(true, done / list.length, `アップロード中… ${done} / ${list.length}`);
       }
-      toast(`${ok}枚を追加しました。「AIで解析する」で内容を読み取りましょう。`);
-    } catch (err) { toast(err.message, 'error'); }
-    finally { progress(false); drawerBusy(false); renderPhotoGrid(); }
-  });
+    };
+    try { await Promise.all(Array.from({ length: Math.min(UPLOAD_PARALLEL, list.length) }, worker)); }
+    finally { progress(false); libBusy(false); renderPhotoGrid(); }
+    const where = folders.length ? `（フォルダ「${folders[0].split('/')[0]}」として保存）` : '';
+    toast(`${ok}枚を追加しました${where}${fail ? `。${fail}枚は失敗しました` : ''}。`, fail ? 'warn' : 'info');
+  }
   function fileToBase64(f) {
     return new Promise((resolve, reject) => {
       const fr = new FileReader();
@@ -848,15 +1149,32 @@
     });
   }
 
+  /* 一覧（絞り込み・選択） */
+  function filteredPhotos() {
+    const words = LIB.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const mc = membershipCount();
+    return chrono(S.photos).reverse().filter(p => {
+      if (LIB.filter === 'orphan') { if (mc.get(p.fileId)) return false; }
+      else if (LIB.filter !== 'all' && (p.status || 'pending') !== LIB.filter) return false;
+      if (!words.length) return true;
+      const text = [p.fileName, p.takenAt, p.place, (p.tags || []).join(' '), p.scene, p.mood, p.description].join(' ').toLowerCase();
+      return words.every(w => text.includes(w));
+    });
+  }
   function renderPhotoGrid() {
+    if (lib.hidden) return;
     const grid = $('#photo-grid');
     if (gridObserver) gridObserver.disconnect();
+    const list = filteredPhotos();
+    const mc = membershipCount();
     const label = { pending: '未解析', done: '解析済み', error: 'エラー' };
-    grid.innerHTML = chrono(S.photos).reverse().map(p => `
-      <div class="ph" data-file="${esc(p.fileId)}" data-status="${p.status || 'pending'}"
+    grid.classList.toggle('selecting', LIB.selecting);
+    grid.innerHTML = list.map(p => `
+      <button type="button" class="ph${LIB.selected.has(p.fileId) ? ' sel' : ''}" data-file="${esc(p.fileId)}" data-status="${p.status || 'pending'}"
         title="${esc([p.fileName, fmtDate(p.takenAt), p.place, (p.tags || []).join('、')].filter(Boolean).join('\n'))}">
-        <img alt="" hidden><span class="st">${label[p.status] || '未解析'}</span>
-      </div>`).join('');
+        <img alt="" hidden><span class="ck"></span><span class="st">${label[p.status] || '未解析'}</span>
+        ${mc.get(p.fileId) ? `<span class="tc">付箋${mc.get(p.fileId)}</span>` : ''}
+      </button>`).join('');
     gridObserver = new IntersectionObserver(entries => {
       entries.forEach(en => {
         if (!en.isIntersecting) return;
@@ -864,9 +1182,417 @@
         const img = en.target.querySelector('img');
         loadImg(en.target.dataset.file, 'thumb').then(u => { img.src = u; img.hidden = false; }).catch(() => {});
       });
-    }, { root: grid, rootMargin: '200px' });
+    }, { root: $('.lib-scroll'), rootMargin: '300px' });
     $$('.ph', grid).forEach(el => gridObserver.observe(el));
+
+    const n = S.photos.length;
+    const done = S.photos.filter(p => p.status === 'done').length;
+    const err = S.photos.filter(p => p.status === 'error').length;
+    $('#photo-stats').textContent = n
+      ? `全${n}枚（解析済み ${done} ／ 未解析 ${n - done - err}${err ? ` ／ エラー ${err}` : ''}）　表示中 ${list.length}枚`
+      : 'まだ写真がありません。写真やフォルダを追加するか、ドライブのフォルダを読み込んでください。';
+    updateSelBar();
   }
+  let qTimer;
+  $('#lib-q').addEventListener('input', e => {
+    clearTimeout(qTimer);
+    qTimer = setTimeout(() => { LIB.q = e.target.value; renderPhotoGrid(); }, 200);
+  });
+  $('#lib-filter').addEventListener('change', e => { LIB.filter = e.target.value; renderPhotoGrid(); });
+  function setSelecting(on, silent) {
+    LIB.selecting = on;
+    if (!on) LIB.selected.clear();
+    $('#btn-select').setAttribute('aria-pressed', String(on));
+    $('#btn-select').textContent = on ? '選択をやめる' : '選択する';
+    if (!silent) renderPhotoGrid();
+  }
+  function updateSelBar() {
+    $('#lib-selbar').hidden = !LIB.selecting;
+    $('#sel-count').textContent = `${LIB.selected.size}枚を選択中`;
+  }
+  $('#btn-select').addEventListener('click', () => setSelecting(!LIB.selecting));
+  $('#photo-grid').addEventListener('click', e => {
+    const el = e.target.closest('.ph');
+    if (!el) return;
+    const id = el.dataset.file;
+    if (LIB.selecting) {
+      LIB.selected.has(id) ? LIB.selected.delete(id) : LIB.selected.add(id);
+      el.classList.toggle('sel', LIB.selected.has(id));
+      updateSelBar();
+    } else {
+      openPhotoEdit(id, () => renderPhotoGrid());
+    }
+  });
+  $('#sel-all').addEventListener('click', () => { filteredPhotos().forEach(p => LIB.selected.add(p.fileId)); renderPhotoGrid(); });
+  $('#sel-clear').addEventListener('click', () => { LIB.selected.clear(); renderPhotoGrid(); });
+  $('#sel-analyze').addEventListener('click', () => {
+    const ids = [...LIB.selected];
+    if (!ids.length) return toast('写真を選んでください。', 'warn');
+    if (!confirm(`選んだ${ids.length}枚をAIで解析します（解析済みの写真も解析し直します）。よろしいですか？`)) return;
+    runAnalyze({ total: ids.length, fileIds: ids });
+  });
+  $('#sel-to-theme').addEventListener('click', () => {
+    const ids = [...LIB.selected];
+    if (!ids.length) return toast('写真を選んでください。', 'warn');
+    openAssign(ids);
+  });
+
+  /* 付箋に入れる */
+  let ASSIGN = [];
+  function openAssign(ids) {
+    ASSIGN = ids;
+    $('#assign-count').textContent = `${ids.length}枚の写真を付箋に入れます。`;
+    $('#assign-theme').innerHTML = '<option value="__new">＋ 新しい付箋を作る</option>' +
+      S.themes.map(t => `<option value="${esc(t.themeId)}">${esc(t.title)}（${t.photoIds.length}枚）</option>`).join('');
+    $('#assign-theme').value = S.themes.length ? S.themes[0].themeId : '__new';
+    $('#dlg-assign [name=title]').value = '';
+    $('#assign-new-wrap').hidden = $('#assign-theme').value !== '__new';
+    $('#dlg-assign').showModal();
+  }
+  $('#assign-theme').addEventListener('change', e => { $('#assign-new-wrap').hidden = e.target.value !== '__new'; });
+  $('#dlg-assign form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const tid = $('#assign-theme').value;
+    try {
+      let r;
+      if (tid === '__new') {
+        const title = e.target.elements.namedItem('title').value.trim();
+        if (!title) return toast('新しい付箋のテーマを入力してください。', 'warn');
+        r = await api('createTheme', Object.assign({ title, photoIds: ASSIGN, coverFileId: ASSIGN[0], color: nextColor() }, newNotePos()));
+      } else {
+        r = await api('assignPhotos', { themeId: tid, fileIds: ASSIGN, mode: 'add' });
+      }
+      upsertTheme(r.theme);
+      $('#dlg-assign').close();
+      setSelecting(false);
+      toast(`「${r.theme.title}」に${ASSIGN.length}枚を入れました。`);
+    } catch (err) { toast(err.message, 'error'); }
+  });
+
+  /* 写真の情報を修正 */
+  let PE = null;
+  function openPhotoEdit(fileId, onSaved) {
+    const p = S.photoMap.get(fileId);
+    if (!p || S.readOnly) return;
+    PE = { fileId, onSaved };
+    fillPhotoForm(p);
+    const img = $('#dlg-photo .pe-img img');
+    img.removeAttribute('src');
+    loadImg(fileId, 'mid', true).then(u => { if (PE && PE.fileId === fileId) img.src = u; }).catch(() => {});
+    renderPeThemes();
+    $('#dlg-photo').showModal();
+  }
+  function fillPhotoForm(p) {
+    const f = $('#dlg-photo form');
+    f.elements.namedItem('takenAt').value = p.takenAt || '';
+    f.elements.namedItem('place').value = p.place || '';
+    f.elements.namedItem('lat').value = p.lat == null ? '' : p.lat;
+    f.elements.namedItem('lng').value = p.lng == null ? '' : p.lng;
+    f.elements.namedItem('tags').value = (p.tags || []).join('、');
+    f.elements.namedItem('scene').value = p.scene || '';
+    f.elements.namedItem('mood').value = p.mood || '';
+    f.elements.namedItem('description').value = p.description || '';
+    f.elements.namedItem('done').checked = p.status === 'done';
+    $('#pe-name').textContent = p.fileName || '';
+  }
+  function renderPeThemes() {
+    const id = PE.fileId;
+    const inT = S.themes.filter(t => t.photoIds.includes(id));
+    $('#pe-theme-chips').innerHTML = inT.length
+      ? inT.map(t => `<span class="pe-chip" style="--c:${esc(t.color)}">${esc(t.title)}<button type="button" data-out="${esc(t.themeId)}" aria-label="${esc(t.title)}から外す">×</button></span>`).join('')
+      : '<span class="muted small">どの付箋にも入っていません。</span>';
+    const others = S.themes.filter(t => !t.photoIds.includes(id));
+    $('#pe-add-theme').innerHTML = others.map(t => `<option value="${esc(t.themeId)}">${esc(t.title)}</option>`).join('');
+    $('#pe-add-theme').disabled = $('#pe-add-btn').disabled = !others.length;
+  }
+  $('#pe-theme-chips').addEventListener('click', async e => {
+    const b = e.target.closest('[data-out]');
+    if (!b) return;
+    try {
+      const r = await api('assignPhotos', { themeId: b.dataset.out, fileIds: [PE.fileId], mode: 'remove' });
+      upsertTheme(r.theme);
+      renderPeThemes();
+      toast(`「${r.theme.title}」から外しました。`);
+    } catch (err) { toast(err.message, 'error'); }
+  });
+  $('#pe-add-btn').addEventListener('click', async () => {
+    const tid = $('#pe-add-theme').value;
+    if (!tid) return;
+    try {
+      const r = await api('assignPhotos', { themeId: tid, fileIds: [PE.fileId], mode: 'add' });
+      upsertTheme(r.theme);
+      renderPeThemes();
+      toast(`「${r.theme.title}」に入れました。`);
+    } catch (err) { toast(err.message, 'error'); }
+  });
+  $('#pe-ai').addEventListener('click', async () => {
+    const id = PE.fileId;
+    const btn = $('#pe-ai');
+    btn.disabled = true; btn.textContent = 'AIが解析しています…';
+    try {
+      const r = await api('analyzeBatch', { fileIds: [id], limit: 1 });
+      mergePhotos(r.photos || []);
+      if (PE && PE.fileId === id) fillPhotoForm(S.photoMap.get(id));
+      toast('解析し直しました。内容を確認して「保存」を押すと、手直しも反映されます。');
+    } catch (err) { toast(err.message, 'error'); }
+    finally { btn.disabled = false; btn.textContent = 'AIで解析し直す'; }
+  });
+  $('#dlg-photo form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const f = e.target;
+    const p = S.photoMap.get(PE.fileId);
+    const takenAt = normDate(f.elements.namedItem('takenAt').value);
+    if (takenAt === null) return toast('撮影日時は 2024-08-15 14:30 の形式で入力してください。', 'warn');
+    const fields = {
+      takenAt, place: f.elements.namedItem('place').value.trim(),
+      lat: f.elements.namedItem('lat').value.trim(), lng: f.elements.namedItem('lng').value.trim(),
+      tags: splitList(f.elements.namedItem('tags').value),
+      scene: f.elements.namedItem('scene').value.trim(), mood: f.elements.namedItem('mood').value.trim(), description: f.elements.namedItem('description').value.trim(),
+      status: f.elements.namedItem('done').checked ? 'done' : (p.status === 'done' ? 'pending' : p.status),
+    };
+    try {
+      const r = await api('updatePhoto', { fileId: PE.fileId, fields });
+      mergePhotos([r.photo]);
+      $('#dlg-photo').close();
+      if (PE.onSaved) PE.onSaved(r.photo);
+      toast('写真の情報を保存しました。');
+    } catch (err) { toast(err.message, 'error'); }
+  });
+
+  /* ============================================================
+   * Excel 書き出し・読み込み
+   * ============================================================ */
+  const XL = {
+    photos: { sheet: '写真', cols: [
+      { k: 'fileId', h: '写真ID（変更しない）', w: 36 }, { k: 'fileName', h: 'ファイル名（参考）', w: 24 },
+      { k: 'status', h: '状態（pending/done）', w: 12 }, { k: 'takenAt', h: '撮影日時', w: 18 },
+      { k: 'place', h: '撮影地', w: 24 }, { k: 'lat', h: '緯度', w: 12 }, { k: 'lng', h: '経度', w: 12 },
+      { k: 'tags', h: 'タグ（、区切り）', w: 36 }, { k: 'scene', h: '場面', w: 14 }, { k: 'mood', h: '雰囲気', w: 14 },
+      { k: 'description', h: '説明', w: 60 },
+    ] },
+    themes: { sheet: '付箋', cols: [
+      { k: 'themeId', h: '付箋ID（新規は new1 など）', w: 20 }, { k: 'title', h: 'テーマ', w: 24 }, { k: 'color', h: '色', w: 10 },
+      { k: 'x', h: 'X位置', w: 8 }, { k: 'y', h: 'Y位置', w: 8 },
+      { k: 'excludedIds', h: '外した写真ID（、区切り）', w: 40 }, { k: 'earthVideoUrl', h: '映像URL', w: 30 },
+      { k: 'delete', h: '削除（○で削除）', w: 10 },
+    ] },
+    members: { sheet: '付箋の写真', cols: [
+      { k: 'themeId', h: '付箋ID', w: 20 }, { k: 'title', h: 'テーマ（参考）', w: 24 },
+      { k: 'fileId', h: '写真ID', w: 36 }, { k: 'fileName', h: 'ファイル名（参考）', w: 24 }, { k: 'cover', h: '表紙（○）', w: 8 },
+    ] },
+    comments: { sheet: 'コメント', cols: [
+      { k: 'commentId', h: 'コメントID（新規は空欄）', w: 22 }, { k: 'fileId', h: '写真ID', w: 36 },
+      { k: 'fileName', h: 'ファイル名（参考）', w: 24 }, { k: 'type', h: '種類（manual/ai）', w: 10 },
+      { k: 'text', h: 'コメント', w: 60 }, { k: 'createdAt', h: '作成日時（参考）', w: 18 }, { k: 'delete', h: '削除（○で削除）', w: 10 },
+    ] },
+  };
+  const colorName = v => (COLORS.find(c => c.v.toLowerCase() === String(v || '').toLowerCase()) || {}).n || v || '';
+  const colorValue = v => {
+    v = String(v || '').trim();
+    const c = COLORS.find(x => x.n === v || x.v.toLowerCase() === v.toLowerCase());
+    return c ? c.v : (/^#[0-9a-f]{6}$/i.test(v) ? v : null);
+  };
+  const isMark = v => /^(○|◯|〇|o|O|1|true|TRUE|削除|x|X|×|✕)$/.test(String(v || '').trim());
+
+  $('#btn-excel-out').addEventListener('click', exportExcel);
+  async function exportExcel() {
+    busy('Excelファイルを作っています…');
+    try {
+      await loadScript(XLSX_URL);
+      const cr = await api('listComments', { all: true });
+      const nameOf = id => (S.photoMap.get(id) || {}).fileName || '';
+      const data = {
+        photos: chrono(S.photos).map(p => Object.assign({}, p, { tags: (p.tags || []).join('、'), lat: p.lat == null ? '' : p.lat, lng: p.lng == null ? '' : p.lng })),
+        themes: S.themes.map(t => ({ themeId: t.themeId, title: t.title, color: colorName(t.color), x: t.x, y: t.y, excludedIds: (t.excludedIds || []).join('、'), earthVideoUrl: t.earthVideoUrl || '', delete: '' })),
+        members: S.themes.flatMap(t => t.photoIds.filter(id => S.photoMap.has(id)).map(id => ({ themeId: t.themeId, title: t.title, fileId: id, fileName: nameOf(id), cover: id === t.coverFileId ? '○' : '' }))),
+        comments: (cr.comments || []).map(c => Object.assign({}, c, { fileName: nameOf(c.fileId), createdAt: fmtDateTime(c.createdAt), delete: '' })),
+      };
+      const wb = XLSX.utils.book_new();
+      const readme = [
+        ['おもいで付箋ボード 管理データ'],
+        ['書き出し日時：' + fmtDateTime(new Date().toISOString())],
+        [''],
+        ['使い方'],
+        ['・各シートを直して保存し、アプリの「写真」画面にある「Excelから読み込む」で読み込みます。変更した所だけが反映されます。'],
+        ['・「写真ID」「付箋ID」「コメントID」と「（参考）」の列は変更しないでください。'],
+        ['・撮影日時は 2024-08-15 14:30 の形式、タグは「、」区切りで入力します。'],
+        ['・付箋の色は、きいろ／ピンク／みずいろ／きみどり／オレンジ のどれかを入れます。'],
+        ['・新しい付箋を作るときは、「付箋」シートの付箋IDに new1 のように new で始まる名前を入れ、「付箋の写真」シートでも同じIDを使います。'],
+        ['・写真を付箋から外すときは「付箋の写真」シートの行を削除します。外した写真は「写真を探し直す」でも戻りません。'],
+        ['・「表紙（○）」に○を付けた写真が付箋の表紙になります。'],
+        ['・付箋やコメントを消すときは「削除」列に ○ を入れます。シートから行を消しただけでは削除されません（「付箋の写真」シートを除く）。'],
+        ['・写真ファイルそのものの追加・削除はできません。アプリの「写真」画面から行ってください。'],
+      ];
+      const ws0 = XLSX.utils.aoa_to_sheet(readme);
+      ws0['!cols'] = [{ wch: 120 }];
+      XLSX.utils.book_append_sheet(wb, ws0, '説明');
+      Object.keys(XL).forEach(key => {
+        const def = XL[key];
+        const aoa = [def.cols.map(c => c.h)].concat(data[key].map(o => def.cols.map(c => (o[c.k] == null ? '' : o[c.k]))));
+        const ws = XLSX.utils.aoa_to_sheet(aoa);
+        ws['!cols'] = def.cols.map(c => ({ wch: c.w }));
+        ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: Math.max(aoa.length - 1, 0), c: def.cols.length - 1 } }) };
+        XLSX.utils.book_append_sheet(wb, ws, def.sheet);
+      });
+      XLSX.writeFile(wb, `omoide-fusen_${ymd()}.xlsx`);
+      toast('Excelに書き出しました。');
+    } catch (err) { toast(err.message, 'error'); } finally { busy(false); }
+  }
+
+  let IMPORT = null;
+  $('#excel-in').addEventListener('change', e => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (f) importExcel(f);
+  });
+  async function importExcel(file) {
+    busy('Excelファイルを読んでいます…');
+    try {
+      await loadScript(XLSX_URL);
+      const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+      const read = key => {
+        const def = XL[key];
+        const ws = wb.Sheets[def.sheet];
+        if (!ws) return null;
+        const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
+        if (!aoa.length) return [];
+        const head = aoa[0].map(h => String(h).trim());
+        const idx = {};
+        def.cols.forEach(c => { idx[c.k] = head.indexOf(c.h); });
+        return aoa.slice(1).filter(r => r.some(v => String(v).trim() !== '')).map(r => {
+          const o = {};
+          def.cols.forEach(c => { o[c.k] = idx[c.k] >= 0 ? String(r[idx[c.k]] == null ? '' : r[idx[c.k]]).trim() : undefined; });
+          return o;
+        });
+      };
+      const P = read('photos'), T = read('themes'), M = read('members'), C = read('comments');
+      if (!P && !T && !M && !C) throw new Error('読み込めるシートがありません。「Excelに書き出す」で作ったファイルを使ってください。');
+      const payload = { photos: [], themes: [], comments: [] };
+
+      // 写真
+      (P || []).forEach(r => {
+        const cur = S.photoMap.get(r.fileId);
+        if (!cur) return;
+        const f = {};
+        const name = cur.fileName || cur.fileId;
+        if (r.takenAt !== undefined) {
+          const d = normDate(r.takenAt);
+          if (d === null) throw new Error(`写真「${name}」の撮影日時「${r.takenAt}」が読めません。2024-08-15 14:30 の形式にしてください。`);
+          if (d !== (cur.takenAt || '')) f.takenAt = d;
+        }
+        ['place', 'scene', 'mood', 'description'].forEach(k => { if (r[k] !== undefined && r[k] !== (cur[k] || '')) f[k] = r[k]; });
+        ['lat', 'lng'].forEach(k => {
+          if (r[k] === undefined) return;
+          const label = k === 'lat' ? '緯度' : '経度';
+          if (r[k] === '') { if (cur[k] != null) f[k] = ''; return; }
+          const n = Number(r[k]);
+          if (isNaN(n)) throw new Error(`写真「${name}」の${label}「${r[k]}」が数字ではありません。`);
+          if (cur[k] == null || Math.abs(n - cur[k]) > 1e-6) f[k] = n;
+        });
+        if (r.tags !== undefined) {
+          const t = splitList(r.tags);
+          if (t.join('、') !== (cur.tags || []).join('、')) f.tags = t;
+        }
+        if (r.status && ['pending', 'done', 'error'].includes(r.status) && r.status !== (cur.status || 'pending')) f.status = r.status;
+        if (Object.keys(f).length) payload.photos.push(Object.assign({ fileId: r.fileId, fileName: cur.fileName }, f));
+      });
+
+      // 付箋（「付箋の写真」シートで写真の出し入れ）
+      const members = new Map();
+      (M || []).forEach(r => {
+        if (!r.themeId || !r.fileId || !S.photoMap.has(r.fileId)) return;
+        if (!members.has(r.themeId)) members.set(r.themeId, { ids: [], cover: '' });
+        const m = members.get(r.themeId);
+        if (!m.ids.includes(r.fileId)) m.ids.push(r.fileId);
+        if (isMark(r.cover) && !m.cover) m.cover = r.fileId;
+      });
+      (T || []).forEach(r => {
+        const id = r.themeId || '';
+        const cur = S.themes.find(t => t.themeId === id);
+        if (isMark(r.delete)) { if (cur) payload.themes.push({ themeId: id, title: cur.title, delete: true }); return; }
+        if (!cur && !r.title) return;
+        const o = { themeId: cur ? id : '' };
+        if (r.title !== undefined && r.title && (!cur || r.title !== cur.title)) o.title = r.title;
+        if (r.color !== undefined && r.color) {
+          const col = colorValue(r.color);
+          if (!col) throw new Error(`付箋「${r.title || id}」の色「${r.color}」が分かりません。きいろ／ピンク／みずいろ／きみどり／オレンジ のどれかにしてください。`);
+          if (!cur || col.toLowerCase() !== String(cur.color).toLowerCase()) o.color = col;
+        }
+        ['x', 'y'].forEach(k => {
+          if (r[k] === undefined || r[k] === '' || isNaN(Number(r[k]))) return;
+          const v = Math.round(Number(r[k]));
+          if (!cur || v !== cur[k]) o[k] = v;
+        });
+        if (r.earthVideoUrl !== undefined && r.earthVideoUrl !== (cur ? cur.earthVideoUrl || '' : '')) o.earthVideoUrl = r.earthVideoUrl;
+        let excl = r.excludedIds !== undefined ? splitList(r.excludedIds).filter(x => S.photoMap.has(x)) : (cur ? (cur.excludedIds || []) : []);
+        if (M) {
+          const m = members.get(id) || { ids: [], cover: '' };
+          const curIds = cur ? cur.photoIds.filter(x => S.photoMap.has(x)) : [];
+          if (!cur || !sameSet(m.ids, curIds) || (m.cover && m.cover !== cur.coverFileId)) {
+            o.photoIds = m.ids;
+            o.coverFileId = m.cover || (cur && m.ids.includes(cur.coverFileId) ? cur.coverFileId : (m.ids[0] || ''));
+            if (cur) excl = uniq(excl.concat(curIds.filter(x => !m.ids.includes(x))));
+          }
+          excl = excl.filter(x => !m.ids.includes(x));
+        }
+        if (!cur ? excl.length : !sameSet(excl, cur.excludedIds || [])) o.excludedIds = excl;
+        if (!cur) { o.title = r.title; payload.themes.push(Object.assign({ isNew: true }, o)); }
+        else if (Object.keys(o).length > 1) payload.themes.push(Object.assign({ titleForSummary: cur.title }, o));
+      });
+
+      // コメント
+      if (C) {
+        const cr = await api('listComments', { all: true });
+        const cur = new Map((cr.comments || []).map(c => [c.commentId, c]));
+        C.forEach(r => {
+          const id = r.commentId || '';
+          const c = cur.get(id);
+          if (c) {
+            if (isMark(r.delete)) payload.comments.push({ commentId: id, delete: true });
+            else if (r.text && r.text !== c.text) payload.comments.push({ commentId: id, text: r.text });
+            return;
+          }
+          if (!id && r.text && S.photoMap.has(r.fileId) && !isMark(r.delete)) {
+            payload.comments.push({ fileId: r.fileId, text: r.text, type: r.type === 'ai' ? 'ai' : 'manual' });
+          }
+        });
+      }
+
+      const n = {
+        photos: payload.photos.length,
+        tNew: payload.themes.filter(t => t.isNew).length,
+        tDel: payload.themes.filter(t => t.delete).length,
+        cNew: payload.comments.filter(c => !c.commentId).length,
+        cDel: payload.comments.filter(c => c.delete).length,
+      };
+      n.tUpd = payload.themes.length - n.tNew - n.tDel;
+      n.cUpd = payload.comments.length - n.cNew - n.cDel;
+      const lines = [
+        n.photos && `写真の情報を ${n.photos}枚 更新`,
+        n.tUpd && `付箋を ${n.tUpd}枚 更新`, n.tNew && `付箋を ${n.tNew}枚 追加`, n.tDel && `付箋を ${n.tDel}枚 削除`,
+        n.cUpd && `コメントを ${n.cUpd}件 更新`, n.cNew && `コメントを ${n.cNew}件 追加`, n.cDel && `コメントを ${n.cDel}件 削除`,
+      ].filter(Boolean);
+      if (!lines.length) { toast('変更はありませんでした。'); return; }
+      IMPORT = payload;
+      $('#import-summary').innerHTML = lines.map(l => `<li>${esc(l)}</li>`).join('');
+      busy(false);
+      $('#dlg-import').showModal();
+    } catch (err) { toast(err.message, 'error'); } finally { busy(false); }
+  }
+  $('#dlg-import form').addEventListener('submit', async e => {
+    e.preventDefault();
+    if (!IMPORT) return;
+    $('#dlg-import').close();
+    busy('Excelの内容を反映しています…');
+    try {
+      const r = await api('importData', IMPORT);
+      IMPORT = null;
+      const x = r.result || {};
+      await loadBoard();
+      renderPhotoGrid();
+      toast(`反映しました（写真 ${x.photos || 0}枚、付箋 更新${x.themesUpdated || 0}・追加${x.themesAdded || 0}・削除${x.themesDeleted || 0}、コメント ${(x.commentsUpdated || 0) + (x.commentsAdded || 0) + (x.commentsDeleted || 0)}件）。`);
+    } catch (err) { toast(err.message, 'error'); } finally { busy(false); }
+  });
 
   /* ============================================================
    * ビューワー
@@ -878,7 +1604,7 @@
 
   function openViewer(t) {
     if (!t) return;
-    const list = t.photoIds.map(photo);
+    const list = t.photoIds.filter(id => S.photoMap.has(id)).map(photo);
     if (!list.length) return toast('このテーマには写真がありません。「写真を探し直す」を試してください。', 'warn');
     V.theme = t; V.list = list; V.current = null; V.comments = new Map();
     $('#v-title').textContent = t.title;
@@ -957,34 +1683,38 @@
     if (!viewer.classList.contains('side-open')) return;
     if (!p) { side.innerHTML = '<p class="muted">写真を表示すると、ここに情報とコメントが出ます。</p>'; return; }
     const cs = commentsOf(p.fileId);
+    const ro = S.readOnly;
     side.innerHTML = `
       <div class="side-meta">
         <p class="side-date">${esc(fmtDate(p.takenAt) || '撮影日不明')}</p>
         <p class="side-place">${esc(p.place || '場所の情報なし')}</p>
         <p class="side-tags">${(p.tags || []).map(t => `<span>${esc(t)}</span>`).join('')}</p>
         ${p.description ? `<p class="side-desc">${esc(p.description)}</p>` : ''}
+        ${ro ? '' : `<p class="side-actions">
+          <button type="button" class="btn small" data-out>この付箋から外す</button>
+          <button type="button" class="link" data-edit>写真の情報を直す</button></p>`}
       </div>
       <ul class="comments">${cs.length ? cs.map(c => `
         <li data-type="${c.type}">
           <p>${esc(c.text)}</p>
-          <span class="who">${c.type === 'ai' ? 'AIの回想' : '自分のコメント'}　${esc(fmtDate(c.createdAt))}</span>
-          <button type="button" class="link danger" data-del="${esc(c.commentId)}">削除</button>
+          <span class="who">${c.type === 'ai' ? 'AIの回想' : 'コメント'}　${esc(fmtDate(c.createdAt))}</span>
+          ${ro ? '' : `<button type="button" class="link danger" data-del="${esc(c.commentId)}">削除</button>`}
         </li>`).join('') : '<li class="empty">まだコメントはありません。</li>'}
       </ul>
-      <form class="comment-form">
+      ${ro ? '' : `<form class="comment-form">
         <textarea name="text" rows="3" maxlength="500" placeholder="この写真の思い出を書く" aria-label="コメント"></textarea>
         <div class="row">
           <button class="btn primary small" type="submit">コメントを保存</button>
           <button class="btn small" type="button" data-ai>AIで回想コメント</button>
         </div>
-      </form>`;
+      </form>`}`;
   }
   const sideEl = $('#v-side');
   sideEl.addEventListener('submit', async e => {
     e.preventDefault();
     const p = V.current, f = e.target;
-    const text = f.text.value.trim();
-    if (!p || !text) return;
+    const text = f.elements.namedItem('text').value.trim();
+    if (!p || !text || S.readOnly) return;
     const btn = f.querySelector('[type=submit]');
     btn.disabled = true;
     try {
@@ -996,7 +1726,7 @@
   });
   sideEl.addEventListener('click', async e => {
     const p = V.current;
-    if (!p) return;
+    if (!p || S.readOnly) return;
     const ai = e.target.closest('[data-ai]');
     const del = e.target.closest('[data-del]');
     if (ai) {
@@ -1014,6 +1744,24 @@
         V.comments.set(p.fileId, commentsOf(p.fileId).filter(c => c.commentId !== del.dataset.del));
         renderSide();
       } catch (err) { toast(err.message, 'error'); }
+    }
+    if (e.target.closest('[data-out]')) {
+      if (!confirm('この写真を「' + V.theme.title + '」から外しますか？（「写真を探し直す」でも戻りません）')) return;
+      try {
+        const r = await api('assignPhotos', { themeId: V.theme.themeId, fileIds: [p.fileId], mode: 'remove' });
+        upsertTheme(r.theme);
+        V.theme = r.theme;
+        V.list = V.list.filter(x => x.fileId !== p.fileId);
+        toast('付箋から外しました。');
+        if (!V.list.length) closeViewer(); else setMode(V.mode);
+      } catch (err) { toast(err.message, 'error'); }
+    }
+    if (e.target.closest('[data-edit]')) {
+      openPhotoEdit(p.fileId, np => {
+        V.list = V.list.map(x => (x.fileId === np.fileId ? np : x));
+        V.current = np;
+        renderSide();
+      });
     }
   });
   function addLocalComment(c) {
@@ -1219,7 +1967,7 @@
     const layers = $('.c-layers', stage);
     const startBox = $('.c-start', stage);
     const STOP = {};
-    let paused = false, voiceOn = true, running = false, warned = false;
+    let paused = false, voiceOn = true, running = false, warned = false, started = false;
     const player = new Audio();
     player.preload = 'auto';
     const alive = () => sess === V.session;
@@ -1387,7 +2135,7 @@
       startBox.hidden = true;
       pauseBtn.disabled = false;
       restartBtn.disabled = false;
-      if (!t.narration || !Array.isArray(t.narration.lines)) {
+      if (!S.readOnly && (!t.narration || !Array.isArray(t.narration.lines))) {
         setSub('', 'ナレーションを用意しています…');
         try {
           const r = await api('generateNarration', { themeId: t.themeId });
@@ -1434,6 +2182,7 @@
     }
 
     $('#c-play', stage).addEventListener('click', () => {
+      if (started && running) return;
       voiceOn = $('#c-voice', stage).checked;
       voiceBtn.textContent = voiceOn ? '音声 オン' : '音声 オフ';
       // iOS 等の自動再生制限を解除するため、クリック内で無音を一度鳴らす
@@ -1441,10 +2190,10 @@
       player.play().catch(() => {});
       if (running) return;
       if (startBox.querySelector('#c-play').textContent.startsWith('もう一度')) { setMode('cinema'); return; }
-      run();
+      started = true;
+      ensureLeaflet().catch(() => {}).then(run);
     });
   }
-
   /* ============================================================
    * 起動
    * ============================================================ */

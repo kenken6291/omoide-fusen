@@ -1,149 +1,135 @@
-# おもいで付箋ボード（omoide-fusen） v1.0.0
+# おもいで付箋ボード（omoide-fusen） v1.1.0
 
-Googleドライブの写真を Gemini が解析し、テーマごとに仮想ホワイトボード上の付箋へまとめて、ランダム・アルバム・走馬灯の3つのモードで振り返る Web アプリです。
+Googleドライブの写真をテーマごとに仮想ホワイトボード上の付箋へまとめ、ランダム・アルバム・走馬灯の3つのモードで振り返る Web アプリです。
 
-## 1. アーキテクチャ
+## v1.1.0 の変更点
+
+| 項目 | 内容 |
+|---|---|
+| 写真の追加 | 複数枚の同時追加に加え「フォルダごと追加」に対応。フォルダ構成のまま読み込み先フォルダの下に保存（3枚並列アップロード） |
+| Gemini の節約 | 画像を384pxの低解像度で送る、4枚ずつまとめて解析、思考トークン0、テーマ検索はキーワード優先（AI不使用）、AI検索結果のキャッシュ、ナレーション音声をドライブに保存して再利用、1人1日の利用上限 |
+| 写真ライブラリ | サムネ一覧から写真の情報（撮影日時・場所・タグ・説明など）を修正、付箋への出し入れ、複数選択して付箋に入れる・解析する、絞り込み検索 |
+| 速度改善 | 起動データを1回で取得、画像を最大16枚まとめて取得、ブラウザ内（IndexedDB）に画像を保存して2回目以降は即表示、地図・Excelライブラリは必要なときだけ読み込み、サーバー側でシート読み込みをまとめる |
+| 閲覧の共有 | 許可した会員だけが、自分のボードを閲覧のみで見られる（編集・コメント・AI生成は不可） |
+| 付箋の整理 | 「写真を整理する」で関係ない写真を外す・表紙を選ぶ。外した写真は「写真を探し直す」でも戻らない |
+| Excel | 写真・付箋・付箋の写真・コメントを Excel に書き出し、修正して読み込むと変更分だけ反映 |
+
+## 1. ファイル構成
 
 ```
 omoide-fusen/
-├── index.html        画面（認証・ボード・ドロワー・ダイアログ・ビューワー）
-├── style.css         ホワイトボード／付箋／3モードのアニメーション
-├── config.js         GAS_URL・バージョン・走馬灯の秒数などの設定
-├── app.js            認証、パン＆ズーム、ドラッグ、ビューワー、TTS再生、地図フライト
-├── media/            （任意）Earth Studio で書き出した MP4 を置く
+├── index.html        画面（認証・ボード・写真ライブラリ・ダイアログ・ビューワー）
+├── style.css
+├── config.js         GAS_URL・バージョン・走馬灯の秒数・同時アップロード数
+├── app.js
+├── media/            （任意）Earth Studio で書き出した MP4
 └── gas/
     ├── Code.gs       Web API（doGet / doPost）
     └── appsscript.json
 ```
 
 ```
-[ブラウザ GitHub Pages]
-   │  POST (Content-Type: text/plain) {action, token, ...}
+[ブラウザ GitHub Pages]  ── IndexedDB（画像キャッシュ）
+   │  POST (text/plain) {action, token, asOwner?, ...}
    ▼
-[GAS Web API  Code.gs] ──► Spreadsheet（Users / Sessions / Photos / Themes / Comments）
-   │                  ──► Google Drive（写真フォルダ・サムネイル・EXIF）
-   │                  ──► Maps 逆ジオコーディング（撮影地名）
-   │                  ──► Gemini API（画像解析・テーマ抽出・提案・ナレーション・回想コメント）
-   │                  ──► Gemini TTS（ナレーション音声 PCM → ブラウザで WAV 化）
-   ▼
-[ブラウザ] 付箋ボード ／ ランダム ／ アルバム ／ 走馬灯（Leaflet 地図フライト・Earth Studio 映像）
+[GAS Code.gs] ──► Spreadsheet（Users / Sessions / Photos / Themes / Comments / Shares）
+              ──► Google Drive（写真・サムネイル・EXIF・_tts-cache）
+              ──► Maps / Geocoding API（撮影地名）
+              ──► Gemini API（解析・テーマ検索・提案・ナレーション・回想コメント）
+              ──► Gemini TTS（音声。同じ文章はドライブから再利用）
 ```
-
-処理の流れは次のとおりです。
-
-写真の取り込みでは、「フォルダを読み込む」で指定フォルダ（サブフォルダ2階層まで）の画像を Photos シートに登録し、「写真を追加」でブラウザから直接アップロードもできます。
-
-解析では、GAS が Drive API から EXIF の撮影日時・緯度経度とサムネイル（768px）を取得し、位置情報は Maps サービスで地名に変換します。そのうえで Gemini がタグ・場面・雰囲気・説明文を JSON で返し、Photos シートに保存します。1回の呼び出しで3枚ずつ処理し、フロント側がループするので GAS の6分制限にかかりません。
-
-テーマ抽出では、画像は送らずに解析済みメタデータ（ID・日時・地名・タグ・説明）だけを Gemini に渡して該当写真を選ばせます。トークンが少なく、数百枚でも速く動きます。
-
-画像表示では、GAS が所有者確認をしたうえでサムネイルを data URL で返します（400 / 900 / 1600px、小さいものは CacheService に6時間キャッシュ）。写真を「リンクを知っている全員」に公開する必要はありません。
 
 ## 2. スプレッドシートのテーブル定義
 
-`setup()` を実行すると自動で作成されます。文字列はすべて先頭に `'` を付けて保存しているため、日付の自動変換や数式インジェクションは起きません。
+列が足りないシートや新しいシートは、アプリの初回アクセス時に自動で見出しが追加されます（`setup()` の再実行は不要）。
 
-**Users**
-
-| カラム | 内容 |
+| シート | カラム |
 |---|---|
-| email | ログインID（小文字化） |
-| nickname | 表示名 |
-| passwordHash | SHA-256(salt + pw + PEPPER) の16進 |
-| salt | ユーザーごとの UUID |
-| isFirstLogin | TRUE の間は changePassword 以外の操作を拒否 |
-| failCount | 連続失敗回数（5回で15分ロック） |
-| lockedUntil | ロック解除時刻（ISO） |
-| folderId | 現在読み込むフォルダ |
-| homeFolderId | 登録時に自動作成したアップロード先フォルダ |
-| createdAt / lastLoginAt | ISO 日時 |
+| Users | email, nickname, passwordHash, salt, isFirstLogin, failCount, lockedUntil, folderId, homeFolderId, createdAt, lastLoginAt |
+| Sessions | token, email, expiresAt, createdAt |
+| Photos | fileId, email, fileName, mimeType, takenAt, lat, lng, place, tags(JSON), mood, scene, description, status(pending/done/error), analyzedAt, addedAt |
+| Themes | themeId, email, title, color, x, y, photoIds(JSON), coverFileId, narration(JSON), earthVideoUrl, createdAt, updatedAt, **excludedIds(JSON)** |
+| Comments | commentId, email, fileId, text, type(manual/ai), createdAt |
+| **Shares** | ownerEmail, viewerEmail, createdAt |
 
-**Sessions**: token, email, expiresAt（30日）, createdAt
+AI の利用回数は、スクリプトプロパティ `u:YYYY-MM-DD` に日別で記録しています（14日より古いものは自動削除）。
 
-**Photos**: fileId, email, fileName, mimeType, takenAt（`yyyy-MM-dd HH:mm`）, lat, lng, place, tags（JSON配列）, mood, scene, description, status（pending / done / error）, analyzedAt, addedAt
+## 3. スクリプトプロパティ
 
-**Themes**: themeId, email, title, color, x, y, photoIds（JSON配列）, coverFileId, narration（JSON: intro / lines[{fileId,text}] / outro）, earthVideoUrl, createdAt, updatedAt
+| プロパティ | 既定値 | 内容 |
+|---|---|---|
+| GEMINI_API_KEY | — | 必須 |
+| GEMINI_MODEL | gemini-2.5-flash | 文章・画像解析のモデル |
+| TTS_MODEL | gemini-2.5-flash-preview-tts | 音声のモデル |
+| TTS_VOICE | Kore | 声 |
+| GOOGLE_MAPS_SERVER_KEY | なし | Geocoding API のサーバーキー（任意） |
+| APP_URL | なし | メール本文に載せるアプリのURL |
+| SHOW_TEMP_PASSWORD | false | 公開運用では false のまま |
+| **DAILY_AI_LIMIT** | 300 | 1人1日あたりのAI利用上限（文章1回＝1、画像1枚＝1、音声生成1回＝1。保存済み音声の再利用は数えない）。0 で無制限 |
+| **GEMINI_THINKING_BUDGET** | 0 | 思考トークンを使わない。精度を上げたいときは `auto` |
+| **ANALYZE_IMAGE_SIZE** | 384 | 解析に送る画像の長辺 px |
+| **ANALYZE_MEDIA_RES** | MEDIA_RESOLUTION_LOW | 画像を低解像度扱いにしてトークンを減らす。`off` で無効 |
+| **ANALYZE_PER_REQUEST** | 4 | 1回の Gemini 呼び出しで解析する枚数（最大8） |
 
-**Comments**: commentId, email, fileId, text, type（manual / ai）, createdAt
+モデルが思考設定や低解像度設定に対応していない場合は、自動的に外して呼び直します。
 
-## 3. セットアップ手順
+## 4. Gemini の消費を減らす仕組み
 
-### 3-1. Gemini API キー
+1. **解析の軽量化**　画像は384pxのサムネイルを低解像度モードで送り、4枚を1回の呼び出しにまとめます。説明文も40字程度に短くしました。
+2. **思考トークン0**　gemini-2.5-flash は既定で思考トークンを使うため、`thinkingBudget: 0` で止めています。
+3. **テーマ検索はキーワード優先**　「テーマを作る」の既定は「おまかせ」で、タグ・場面・撮影地・日付で3枚以上見つかれば AI を使いません。「キーワードのみ」を選ぶと AI を一切使いません。AI で探した結果は6時間キャッシュします。
+4. **音声の再利用**　ナレーション音声はドライブの `_tts-cache` フォルダに保存し、同じ文章・同じ声なら2回目以降は Gemini を呼びません。
+5. **手入力で解析をスキップ**　写真の情報を手で入れて「解析済みにする」にチェックすると、その写真は AI 解析の対象外になります。
+6. **1日の上限**　`DAILY_AI_LIMIT` を超えると AI を使う操作が止まります。今日の利用状況は「設定」で確認できます。
 
-1. Google AI Studio（https://aistudio.google.com/apikey）で API キーを作成します。いつもの GCP プロジェクトに紐づけて構いません。
-2. TTS モデルを使うため、課金が有効なプロジェクトのキーを推奨します。
+## 5. 主な使い方
 
-### 3-2. GAS プロジェクト
+### 写真の追加と修正
+「写真」で写真ライブラリを開きます。「写真を追加」で複数枚、「フォルダごと追加」でパソコンのフォルダを丸ごと選べます。フォルダごと追加した写真は、読み込み先フォルダの下に同じフォルダ名（4階層まで）で保存されます。同じファイル名の写真があると、飛ばすかどうかを確認します。
 
-1. https://script.google.com で新しいプロジェクトを作り、名前を `omoide-fusen` にします。
-2. 「プロジェクトの設定」で「appsscript.json マニフェスト ファイルをエディタで表示する」をオンにし、`gas/appsscript.json` の内容で置き換えます。
-3. `Code.gs` に `gas/Code.gs` の内容を貼り付けます（clasp を使う場合は `gas/` を rootDir にして `clasp push`）。
-4. 「プロジェクトの設定 > スクリプト プロパティ」に次を追加します。
+サムネイルをタップすると写真の情報を修正でき、入っている付箋の確認や出し入れもできます。「選択する」で複数枚を選び、まとめて付箋に入れたり解析したりできます。絞り込み欄にはタグ・場所・説明・日付（例：2024-08）を入れられ、「どの付箋にも入っていない」写真だけを表示することもできます。
 
-| プロパティ | 値 |
-|---|---|
-| GEMINI_API_KEY | 3-1 のキー（必須） |
-| GEMINI_MODEL | 既定 `gemini-2.5-flash`。新しいモデルを使う場合はその名前 |
-| TTS_MODEL | 既定 `gemini-2.5-flash-preview-tts`。新しい TTS モデルを使う場合はその名前 |
-| TTS_VOICE | 既定 `Kore` |
-| APP_URL | `https://kenken6291.github.io/omoide-fusen/`（メール本文に載ります） |
-| SHOW_TEMP_PASSWORD | 既定 `false`。`true` にすると登録時に仮パスワードを画面にも表示 |
+### 付箋から写真を外す
+付箋の「⋯」から「写真を整理する」を開き、関係ない写真の「外す」を押して保存します。★で表紙も選べます。ビューワーのコメント欄にある「この付箋から外す」でも外せます。外した写真は付箋ごとに記録され、「写真を探し直す」でも戻りません。戻すときは写真の情報画面か、ライブラリから付箋に入れ直します。
 
-5. エディタで関数 `setup` を選んで実行し、権限を承認します。ログにスプレッドシートと写真ルートフォルダの URL が出ます。
-6. （任意）「トリガー」で `cleanupSessions` を1日1回の時間主導トリガーに設定すると、期限切れセッションが掃除されます。
+### 閲覧の共有
+「設定」の「ボードの閲覧を許可する会員」にメールアドレスを入れると、その会員にお知らせメールが届きます。許可された会員の画面上部には「ボード」の切り替えが出て、相手のボードを閲覧のみで見られます。付箋の移動・編集・コメント・写真ライブラリ・ナレーション生成はできません。ナレーションが作成済みの付箋は、走馬灯で音声つきで再生できます。
 
-`SHOW_TEMP_PASSWORD` を `true` にすると、他人のメールアドレスでも登録できてしまい、そのアドレスに共有されたフォルダを読み込めるようになります。公開運用では `false` のままにしてください（メール送信に失敗したときだけ画面に表示されます）。
+### Excel での一括修正
+写真ライブラリの「Excelに書き出す」で、説明・写真・付箋・付箋の写真・コメントの5シートを含む xlsx を作ります。修正後に「Excelから読み込む」を押すと、変更点の一覧を確認してから反映します。変わった所だけを送るので、ほかの操作と重なりにくい作りです。
 
-### 3-3. ウェブアプリとしてデプロイ
+付箋を新しく作るときは、付箋IDに `new1` のような名前を入れ、「付箋の写真」シートでも同じIDを使います。付箋やコメントの削除は「削除」列に ○ を入れます（行を消しただけでは削除されません）。写真を付箋から外すときは「付箋の写真」シートの行を削除します。写真ファイルの追加・削除は Excel ではできません。
 
-1. 「デプロイ > 新しいデプロイ > 種類：ウェブアプリ」
-2. 実行ユーザー：自分、アクセスできるユーザー：全員
-3. 表示された `https://script.google.com/macros/s/…/exec` を控えます。
+## 6. 更新手順（v1.0.x から）
 
-**Code.gs を変更したら、必ず「デプロイを管理 > 鉛筆アイコン > バージョン：新バージョン > デプロイ」で再デプロイしてください。** 保存しただけでは公開中の API に反映されません。「新しいデプロイ」を作ると URL が変わるので、その場合は config.js かアプリの設定画面の URL を書き換えます。
+1. `gas/Code.gs` を差し替え、「デプロイを管理 → 編集 → 新バージョン」で再デプロイします。シートの列追加は自動です。
+2. `index.html` `style.css` `app.js` `config.js` を差し替えて push します。
+3. ブラウザで強制再読み込み（Ctrl＋F5）をします。
 
-### 3-4. GitHub リポジトリと GitHub Pages
+## 7. 新規セットアップ
 
-1. GitHub で `omoide-fusen` リポジトリを作成します。
-2. `config.js` の `GAS_URL` を 3-3 の URL に書き換えます。
-3. `index.html` `style.css` `app.js` `config.js`（と任意で `media/`、`gas/`）を push します。
-   ```bash
-   git init && git add . && git commit -m "v1.0.0"
-   git branch -M main
-   git remote add origin https://github.com/kenken6291/omoide-fusen.git
-   git push -u origin main
-   ```
-4. リポジトリの Settings > Pages で「Deploy from a branch / main / root」を選びます。
-5. `https://kenken6291.github.io/omoide-fusen/` で開けます。
+1. Google AI Studio で Gemini API キーを作成します。
+2. GAS プロジェクトを作り、`appsscript.json` と `Code.gs` を貼り付けます。
+3. スクリプトプロパティに `GEMINI_API_KEY` などを設定します。
+4. エディタで `setup()` を実行して権限を承認します。
+5. ウェブアプリとしてデプロイします（実行：自分／アクセス：全員）。
+6. `config.js` の `GAS_URL` を書き換え、GitHub に push して Pages を有効にします。
+7. （任意）`cleanupSessions` を1日1回の時間主導トリガーに設定します。
 
-## 4. 使い方
+**Code.gs を変更したら、必ず新バージョンで再デプロイしてください。** 保存しただけでは公開中の API に反映されません。
 
-1. 新規登録すると、メールに仮パスワードが届きます。ログインすると本パスワードの設定画面に切り替わります。
-2. 「写真」から、写真を追加するか、自分のドライブのフォルダを指定して読み込みます。自分のドライブのフォルダを使う場合は、そのフォルダを GAS をデプロイしたアカウント（管理者）と共有してください。登録したメールアドレスのアカウントが所有・共有しているフォルダだけを指定できます。
-3. 「AIで解析する」で写真を解析します。
-4. 「テーマを作る」でテーマを入力するか、「AI提案」でまとめて付箋を貼ります。
-5. 付箋はドラッグで移動、ボードはドラッグで移動、ホイールまたはピンチで拡大縮小できます。付箋をタップするとビューワーが開きます。
+## 8. Google Earth Studio との連携
 
-## 5. Google Earth Studio との連携
+付箋のメニュー「撮影地と映像」で撮影地の座標をコピーし、Earth Studio のカメラ目標地点に使います。書き出した連番画像は ffmpeg で MP4 にまとめ、リポジトリの `media/` に置いて URL 欄に `media/xxx.mp4` と入力します。
 
-Earth Studio には外部 API がないため、次の手順で映像を作って取り込みます。
+```bash
+ffmpeg -framerate 30 -i footage/project_%03d.jpeg -c:v libx264 -pix_fmt yuv420p -crf 23 media/flight.mp4
+```
 
-1. 付箋のメニュー「撮影地と映像」を開くと、写真の撮影地が座標つきで並びます。「座標をコピー」で Earth Studio のカメラ目標地点に貼り付けます。
-2. Earth Studio（https://earth.google.com/studio/）で「Fly To」などのテンプレートからプロジェクトを作り、MP4 を書き出します（書き出しは画像連番なので、ffmpeg で MP4 にまとめます）。
-   ```bash
-   ffmpeg -framerate 30 -i footage/project_%03d.jpeg -c:v libx264 -pix_fmt yuv420p -crf 23 media/hawaii.mp4
-   ```
-3. MP4 をリポジトリの `media/` に置いて push し、「撮影地と映像」に `media/hawaii.mp4` と入力して保存します。GitHub のファイルは100MB未満にしてください。
-4. 走馬灯ではタイトルのあとにこの映像が流れます。写真と写真の撮影地が30km以上離れている箇所では、Leaflet の地図が次の撮影地へ飛ぶ演出が自動で入ります（距離は config.js の `FLIGHT_DISTANCE_KM` で変更できます）。
+走馬灯ではタイトルのあとにこの映像が流れ、撮影地が30km以上離れた写真の間には地図のフライト演出が入ります。
 
-YouTube（限定公開可）の URL も自動再生できます。Google ドライブの URL は埋め込みの仕様上、再生ボタンを押す必要があります。Earth Studio の映像を公開する際は、Google の帰属表示ルールに従ってください。
+## 9. 補足と制限
 
-## 6. 補足と制限
+フォルダの読み込みは4階層下まで、最大3,000枚です。1枚あたり15MBまでアップロードできます。画像キャッシュはブラウザに保存され、ログアウトすると消えます（「設定」から手動でも消せます）。閲覧のみの会員もサムネイルを自分のブラウザにキャッシュします。
 
-ナレーションは1テーマあたり最大24枚（多い場合は撮影順に均等に抜き出し）です。走馬灯では、ナレーションがまだないテーマは再生時に自動で作成し、付箋メニューの「ナレーションを作り直す」で作り直せます。写真を探し直すとナレーションはリセットされます。
-
-TTS 音声は1文ずつ生成し、次の写真の分を先に取得しておくので、表示中は待ち時間がほとんど出ません。iPhone でも鳴るよう、「再生する」を押した瞬間に無音を一度再生して自動再生制限を解除しています。
-
-HEIC 画像は Drive のサムネイル経由で JPEG として表示されます。アップロード直後はサムネイル生成が遅れることがあり、その場合は少し待ってから解析してください。
-
-GAS の Web アプリは同時実行に上限があり、Gemini の無料枠にも回数制限があります。解析中に 429 エラーが出たら、少し待ってから「AIで解析する」を押し直してください（処理済みの写真は飛ばされます）。
+AI解析中に上限や 429 エラーが出たら、時間をおいて「AIで解析する」を押し直してください。処理済みの写真は飛ばされます。

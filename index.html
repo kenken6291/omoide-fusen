@@ -8,9 +8,10 @@
 <meta name="theme-color" content="#E9EDF1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://script.google.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Klee+One:wght@400;600&family=Shippori+Mincho:wght@500;700&family=Zen+Maru+Gothic:wght@500;700&display=swap">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%93%8C%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css?v=1.1.1">
 </head>
 <body>
 
@@ -96,15 +97,21 @@
 <div id="app" class="app" hidden>
   <header class="topbar">
     <h1 class="wordmark small">おもいで付箋ボード</h1>
+    <label class="board-switch" id="board-switch-wrap" hidden>
+      <span class="sr">表示するボード</span>
+      <select id="board-switch" aria-label="表示するボード"></select>
+    </label>
     <nav class="tools" aria-label="ボードの操作">
-      <button class="btn primary" id="btn-new">テーマを作る</button>
-      <button class="btn" id="btn-suggest"><span class="lg">AIにテーマを提案してもらう</span><span class="sm">AI提案</span></button>
-      <button class="btn" id="btn-photos">写真 <span class="pill" id="photo-count">0</span></button>
+      <button class="btn primary edit-only" id="btn-new">テーマを作る</button>
+      <button class="btn edit-only" id="btn-suggest"><span class="lg">AIにテーマを提案してもらう</span><span class="sm">AI提案</span></button>
+      <button class="btn edit-only" id="btn-photos">写真 <span class="pill" id="photo-count">0</span></button>
       <button class="icon-btn" id="btn-settings" aria-label="設定" data-open-settings>
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
       </button>
     </nav>
   </header>
+
+  <p id="readonly-banner" class="readonly-banner" hidden></p>
 
   <div id="viewport" class="viewport" tabindex="0" aria-label="ホワイトボード">
     <div id="board" class="board"></div>
@@ -114,11 +121,11 @@
     <div class="sticky hint" style="--c:#A9E3F2">
       <h2>はじめかた</h2>
       <ol>
-        <li>「写真」で、フォルダを読み込むか写真を追加します。</li>
-        <li>「AIで解析する」で、写真の内容をAIが読み取ります。</li>
+        <li>「写真」で、写真やフォルダを追加するか、ドライブのフォルダを読み込みます。</li>
+        <li>「AIで解析する」で写真の内容を読み取ります（手で入力してもかまいません）。</li>
         <li>「テーマを作る」か「AI提案」で、付箋をボードに貼ります。</li>
       </ol>
-      <button class="btn primary" data-open-drawer>写真を用意する</button>
+      <button class="btn primary" data-open-library>写真を用意する</button>
     </div>
   </div>
 
@@ -130,38 +137,71 @@
   <p class="version-tag">v<span class="ver"></span></p>
 </div>
 
-<!-- ===================== 写真ドロワー ===================== -->
-<aside id="drawer" class="drawer" aria-label="写真の管理" aria-hidden="true">
-  <header class="drawer-head">
-    <h2>写真</h2>
-    <button class="icon-btn" data-close-drawer aria-label="閉じる">✕</button>
+<!-- ===================== 写真ライブラリ ===================== -->
+<section id="library" class="library" aria-label="写真ライブラリ" hidden>
+  <header class="lib-head">
+    <h2>写真ライブラリ</h2>
+    <div class="lib-head-actions">
+      <button class="btn small" id="btn-excel-out">Excelに書き出す</button>
+      <label class="btn small file-btn">Excelから読み込む<input type="file" id="excel-in" accept=".xlsx" hidden></label>
+      <button class="icon-btn" data-close-library aria-label="閉じる">✕</button>
+    </div>
   </header>
-  <section class="folder-box">
-    <p class="muted">読み込むフォルダ</p>
-    <p class="folder-name"><a id="folder-link" target="_blank" rel="noopener">—</a></p>
-    <form id="folder-form" class="row">
-      <input name="folder" placeholder="GoogleドライブのフォルダURLまたはID" autocomplete="off">
-      <button class="btn small" type="submit">変更</button>
-    </form>
-    <button type="button" class="link" id="folder-home">最初のフォルダ（アップロード先）に戻す</button>
-  </section>
-  <div class="drawer-actions">
-    <button class="btn" id="btn-scan">フォルダを読み込む</button>
-    <label class="btn file-btn">写真を追加<input type="file" id="file-input" accept="image/*" multiple hidden></label>
-    <button class="btn primary" id="btn-analyze">AIで解析する</button>
+
+  <div class="lib-scroll">
+    <details class="lib-folder">
+      <summary>読み込むフォルダ：<strong id="folder-label">—</strong></summary>
+      <p class="muted small">ドライブのフォルダを指定すると、その中（4階層下まで）の写真を読み込みます。「写真を追加」「フォルダごと追加」の写真もこのフォルダに保存されます。</p>
+      <p><a id="folder-link" target="_blank" rel="noopener">ドライブで開く</a></p>
+      <form id="folder-form" class="row">
+        <input name="folder" placeholder="GoogleドライブのフォルダURLまたはID" autocomplete="off">
+        <button class="btn small" type="submit">変更</button>
+      </form>
+      <button type="button" class="link" id="folder-home">最初のフォルダに戻す</button>
+    </details>
+
+    <div class="lib-actions">
+      <button class="btn" id="btn-scan">フォルダを読み込む</button>
+      <label class="btn file-btn">写真を追加<input type="file" id="file-input" accept="image/*" multiple hidden></label>
+      <label class="btn file-btn">フォルダごと追加<input type="file" id="dir-input" webkitdirectory directory multiple hidden></label>
+      <button class="btn primary" id="btn-analyze">AIで解析する</button>
+    </div>
+
+    <div id="progress" class="progress" hidden>
+      <div class="bar"><i></i></div>
+      <p></p>
+      <button type="button" class="link" id="btn-stop">止める</button>
+    </div>
+
+    <div class="lib-toolbar">
+      <input type="search" id="lib-q" placeholder="タグ・場所・説明・日付で絞り込み" aria-label="絞り込み">
+      <select id="lib-filter" aria-label="状態で絞り込み">
+        <option value="all">すべて</option>
+        <option value="pending">未解析</option>
+        <option value="done">解析済み</option>
+        <option value="error">エラー</option>
+        <option value="orphan">どの付箋にも入っていない</option>
+      </select>
+      <button class="btn small" id="btn-select" aria-pressed="false">選択する</button>
+    </div>
+
+    <div class="lib-selbar" id="lib-selbar" hidden>
+      <strong id="sel-count">0枚を選択中</strong>
+      <button class="btn small primary" id="sel-to-theme">付箋に入れる</button>
+      <button class="btn small" id="sel-analyze">AIで解析</button>
+      <button class="btn small" id="sel-all">表示中をすべて選ぶ</button>
+      <button class="link" id="sel-clear">選択を解除</button>
+    </div>
+
+    <p id="photo-stats" class="muted stats"></p>
+    <div id="photo-grid" class="photo-grid"></div>
   </div>
-  <div id="progress" class="progress" hidden>
-    <div class="bar"><i></i></div>
-    <p></p>
-    <button type="button" class="link" id="btn-stop">止める</button>
-  </div>
-  <p id="photo-stats" class="muted stats"></p>
-  <div id="photo-grid" class="photo-grid"></div>
-</aside>
+</section>
 
 <!-- ===================== 付箋メニュー ===================== -->
 <div id="note-menu" class="menu" role="menu" hidden>
   <button role="menuitem" data-act="open">開く</button>
+  <button role="menuitem" data-act="organize">写真を整理する（外す・表紙）</button>
   <button role="menuitem" data-act="edit">名前と色を変える</button>
   <button role="menuitem" data-act="refresh">写真を探し直す</button>
   <button role="menuitem" data-act="narration">ナレーションを作り直す</button>
@@ -176,8 +216,13 @@
     <label class="field"><span>テーマ</span>
       <input name="title" maxlength="30" required placeholder="例：海に行った日"></label>
     <div class="chips" id="preset-chips"></div>
+    <fieldset class="radios">
+      <legend>写真の探し方</legend>
+      <label><input type="radio" name="mode" value="auto" checked> おまかせ（キーワード優先、足りなければAI）</label>
+      <label><input type="radio" name="mode" value="keyword"> キーワードのみ（AIを使わない）</label>
+      <label><input type="radio" name="mode" value="ai"> AIで探す</label>
+    </fieldset>
     <fieldset class="swatches"><legend>付箋の色</legend><div class="sw-list" data-swatches="new"></div></fieldset>
-    <p class="muted">解析済みの写真から、テーマに合うものをAIが選んで付箋にします。</p>
     <div class="dlg-actions">
       <button type="button" class="btn" data-close>やめる</button>
       <button type="submit" class="btn primary">写真を探して貼る</button>
@@ -209,6 +254,73 @@
   </form>
 </dialog>
 
+<dialog id="dlg-organize" class="dlg wide">
+  <form>
+    <h2 id="org-title">写真を整理する</h2>
+    <p class="muted">関係ない写真は「外す」を押してください。外した写真は「写真を探し直す」でも戻りません。★で表紙を選べます。</p>
+    <div id="org-grid" class="org-grid"></div>
+    <p class="muted small" id="org-count"></p>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-close>やめる</button>
+      <button type="submit" class="btn primary">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-assign" class="dlg">
+  <form>
+    <h2>付箋に入れる</h2>
+    <p class="muted" id="assign-count"></p>
+    <label class="field"><span>入れる付箋</span><select name="themeId" id="assign-theme"></select></label>
+    <label class="field" id="assign-new-wrap"><span>新しい付箋のテーマ</span><input name="title" maxlength="30" placeholder="例：2024年 沖縄旅行"></label>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-close>やめる</button>
+      <button type="submit" class="btn primary">入れる</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-photo" class="dlg wide">
+  <form>
+    <h2>写真の情報</h2>
+    <div class="photo-edit">
+      <div class="pe-img"><img alt=""></div>
+      <div class="pe-fields">
+        <p class="muted small" id="pe-name"></p>
+        <div class="row2">
+          <label class="field"><span>撮影日時</span><input name="takenAt" placeholder="2024-08-15 14:30"></label>
+          <label class="field"><span>撮影地</span><input name="place" maxlength="80"></label>
+        </div>
+        <div class="row2">
+          <label class="field"><span>緯度</span><input name="lat" inputmode="decimal"></label>
+          <label class="field"><span>経度</span><input name="lng" inputmode="decimal"></label>
+        </div>
+        <label class="field"><span>タグ（「、」区切り）</span><input name="tags"></label>
+        <div class="row2">
+          <label class="field"><span>場面</span><input name="scene" maxlength="30"></label>
+          <label class="field"><span>雰囲気</span><input name="mood" maxlength="30"></label>
+        </div>
+        <label class="field"><span>説明</span><textarea name="description" rows="3" maxlength="300"></textarea></label>
+        <label class="check-row"><input type="checkbox" name="done"> 解析済みにする（AI解析の対象から外す）</label>
+        <div class="pe-themes">
+          <span class="lbl">入っている付箋</span>
+          <div id="pe-theme-chips" class="pe-chips"></div>
+          <div class="row">
+            <select id="pe-add-theme" aria-label="追加する付箋"></select>
+            <button type="button" class="btn small" id="pe-add-btn">この付箋に入れる</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="dlg-actions">
+      <button type="button" class="btn" id="pe-ai">AIで解析し直す</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn" data-close>閉じる</button>
+      <button type="submit" class="btn primary">保存</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="dlg-earth" class="dlg wide">
   <form>
     <h2>撮影地と映像</h2>
@@ -224,6 +336,18 @@
   </form>
 </dialog>
 
+<dialog id="dlg-import" class="dlg">
+  <form>
+    <h2>Excelの読み込み</h2>
+    <p class="muted">次の変更を反映します。よろしいですか？</p>
+    <ul id="import-summary" class="import-summary"></ul>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-close>やめる</button>
+      <button type="submit" class="btn primary">反映する</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="dlg-settings" class="dlg">
   <form>
     <h2>設定</h2>
@@ -231,11 +355,30 @@
       <input name="gasUrl" type="url" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off"></label>
     <p class="muted small">空にすると config.js の URL を使います。GASを新しくデプロイしたときはここを書き換えてください。</p>
     <label class="field"><span>ナレーションの声</span><select name="voice"></select></label>
-    <div id="settings-account" class="account" hidden>
-      <p><strong id="acc-name"></strong><br><span class="muted" id="acc-email"></span></p>
-      <button type="button" class="btn small" data-action="logout">ログアウト</button>
+
+    <div id="settings-member" hidden>
+      <section class="set-sec">
+        <h3>今日のAI利用</h3>
+        <p id="usage-text" class="muted"></p>
+      </section>
+      <section class="set-sec">
+        <h3>ボードの閲覧を許可する会員</h3>
+        <p class="muted small">許可した会員は、あなたのボードを見ることだけできます（編集・コメントはできません）。</p>
+        <ul id="share-list" class="share-list"></ul>
+        <div class="row">
+          <input type="email" id="share-email" placeholder="会員のメールアドレス" aria-label="閲覧を許可するメールアドレス">
+          <button type="button" class="btn small" id="share-add">許可する</button>
+        </div>
+      </section>
+      <section class="set-sec account">
+        <p><strong id="acc-name"></strong><br><span class="muted" id="acc-email"></span></p>
+        <button type="button" class="btn small" data-action="logout">ログアウト</button>
+      </section>
     </div>
-    <p class="muted small">おもいで付箋ボード v<span class="ver"></span>　<button type="button" class="link" id="btn-test">接続を確かめる</button></p>
+
+    <p class="muted small">おもいで付箋ボード v<span class="ver"></span>
+      <button type="button" class="link" id="btn-test">接続を確かめる</button>
+      <button type="button" class="link" id="btn-clear-cache">画像キャッシュを消す</button></p>
     <div class="dlg-actions">
       <button type="button" class="btn" data-close>閉じる</button>
       <button type="submit" class="btn primary">設定を保存</button>
@@ -264,8 +407,7 @@
 <div id="busy" class="busy" hidden><div class="busy-card"><span class="spinner" aria-hidden="true"></span><p id="busy-msg"></p></div></div>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<script src="config.js"></script>
-<script src="app.js"></script>
+<script src="config.js?v=1.1.1"></script>
+<script src="app.js?v=1.1.1"></script>
 </body>
 </html>
