@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — app.js  v1.7.0 */
+/* おもいで付箋ボード — app.js  v1.7.1 */
 (() => {
   'use strict';
 
@@ -2232,14 +2232,28 @@
         toast(`${ids.length}枚を付箋から外しました。`);
       } catch (err) { toast(err.message, 'error'); } finally { busy(false); }
     });
+    const coverBtn = ctrlBtn('表紙にする', () => setCover([...sel][0]));
+    async function setCover(id) {
+      if (!id || id === V.theme.coverFileId) return;
+      busy('表紙を変えています…');
+      try {
+        const r = await api('updateTheme', { themeId: V.theme.themeId, fields: { coverFileId: id } });
+        upsertTheme(r.theme);
+        sel.clear(); refreshViewerList(); render();
+        toast('表紙を変えました。');
+      } catch (err) { toast(err.message, 'error'); } finally { busy(false); }
+    }
     const addBtn = ctrlBtn('写真を追加', () => {
       openPicker(V.theme, () => { if (!alive()) return; refreshViewerList(); render(); });
     }, 'btn small primary');
-    if (!ro) controls.append(allBtn, clearBtn, bulkBtn, outBtn, addBtn);
+    if (!ro) controls.append(allBtn, clearBtn, coverBtn, bulkBtn, outBtn, addBtn);
 
     function update() {
       $('.vg-info', stage).textContent = ro ? `${V.list.length}枚` : `${V.list.length}枚　${sel.size}枚を選択中`;
       bulkBtn.disabled = outBtn.disabled = clearBtn.disabled = !sel.size;
+      // 表紙は1枚だけ選んだときに変えられる
+      coverBtn.disabled = sel.size !== 1 || [...sel][0] === V.theme.coverFileId;
+      coverBtn.title = sel.size === 1 ? '' : '表紙にしたい写真を1枚だけ選んでください';
     }
     function render() {
       if (obs) obs.disconnect();
@@ -2249,7 +2263,7 @@
         return `<div class="vg-item${on ? ' sel' : ''}" data-file="${esc(p.fileId)}"${ro ? '' : ` role="checkbox" tabindex="0" aria-checked="${on}"`}>
           <span class="im"><img alt="" hidden></span>
           ${ro ? '' : '<span class="ck"></span>'}
-          ${p.fileId === V.theme.coverFileId ? '<span class="cv">表紙</span>' : ''}
+          ${p.fileId === V.theme.coverFileId ? '<span class="cv">表紙</span>' : (ro ? '' : '<button type="button" class="cvb" aria-label="この写真を表紙にする">★ 表紙にする</button>')}
           ${ro ? '' : '<button type="button" class="ed" aria-label="写真の情報を開く">✎</button>'}
           <span class="cap">${esc([fmtDate(p.takenAt), p.place].filter(Boolean).join('　') || p.fileName || '')}</span>
         </div>`;
@@ -2276,6 +2290,7 @@
     grid.addEventListener('click', e => {
       const el = e.target.closest('.vg-item');
       if (!el || ro) return;
+      if (e.target.closest('.cvb')) { setCover(el.dataset.file); return; }
       if (e.target.closest('.ed')) {
         openPhotoEdit(el.dataset.file, () => { if (!alive()) return; refreshViewerList(); render(); });
         return;
@@ -2284,7 +2299,7 @@
     });
     grid.addEventListener('keydown', e => {
       const el = e.target.closest('.vg-item');
-      if (el && (e.key === ' ' || e.key === 'Enter') && !e.target.closest('.ed')) { e.preventDefault(); toggle(el); }
+      if (el && (e.key === ' ' || e.key === 'Enter') && !e.target.closest('.ed, .cvb')) { e.preventDefault(); toggle(el); }
     });
     V.cleanup = () => { if (obs) obs.disconnect(); };
     render();
