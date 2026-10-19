@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — app.js  v1.6.0 */
+/* おもいで付箋ボード — app.js  v1.7.0 */
 (() => {
   'use strict';
 
@@ -830,11 +830,31 @@
   });
 
   /* AIにテーマを提案してもらう */
-  $('#btn-suggest').addEventListener('click', async () => {
-    if (analyzedCount() < 3) { toast('解析済みの写真が3枚以上必要です。', 'warn'); openLibrary(); return; }
-    busy('AIが写真を見比べて、テーマを考えています…');
+  /* AIで解析した写真（ai）と、手で「解析済みにする」にした写真（manual） */
+  const aiDone = p => p.status === 'done' && p.analyzedBy !== 'manual';
+  const manualDone = p => p.status === 'done' && p.analyzedBy === 'manual';
+  $('#btn-suggest').addEventListener('click', () => {
+    const nAi = S.photos.filter(aiDone).length;
+    const nManual = S.photos.filter(manualDone).length;
+    if (nAi + nManual < 3) { toast('解析済みの写真が3枚以上必要です。', 'warn'); openLibrary(); return; }
+    if (!nManual) { runSuggest(false); return; }
+    $('#sg-ai-n').textContent = nAi;
+    $('#sg-all-n').textContent = nAi + nManual;
+    const f = $('#dlg-suggest-opt form');
+    f.querySelector(`[name=scope][value="${nAi >= 3 ? 'ai' : 'all'}"]`).checked = true;
+    f.querySelector('[name=scope][value="ai"]').disabled = nAi < 3;
+    $('#dlg-suggest-opt').showModal();
+  });
+  $('#dlg-suggest-opt form').addEventListener('submit', e => {
+    e.preventDefault();
+    const all = (e.currentTarget.querySelector('[name=scope]:checked') || {}).value === 'all';
+    $('#dlg-suggest-opt').close();
+    runSuggest(all);
+  });
+  async function runSuggest(includeManual) {
+    busy('AIがスプレッドシートの写真情報を見比べて、テーマを考えています…');
     let r;
-    try { r = await api('suggestThemes'); }
+    try { r = await api('suggestThemes', { includeManual }); }
     catch (err) { toast(err.message, 'error'); return; }
     finally { busy(false); }
     S.suggestions = r.suggestions || [];
@@ -851,7 +871,7 @@
       if (el.dataset.file) loadImg(el.dataset.file, 'thumb').then(u => { el.style.backgroundImage = `url("${u}")`; }).catch(() => {});
     });
     $('#dlg-suggest').showModal();
-  });
+  }
   $('#dlg-suggest form').addEventListener('submit', async e => {
     e.preventDefault();
     const picks = $$('#suggest-list [data-i]').filter(c => c.checked).map(c => {

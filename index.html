@@ -13,7 +13,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%93%8C%3C/text%3E%3C/svg%3E">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-<link rel="stylesheet" href="style.css?v=1.6.0">
+<link rel="stylesheet" href="style.css?v=1.7.0">
 </head>
 <body>
 
@@ -250,6 +250,23 @@
     <div class="dlg-actions">
       <button type="button" class="btn" data-close>やめる</button>
       <button type="submit" class="btn primary">変更を保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-suggest-opt" class="dlg">
+  <form>
+    <h2>AIにテーマを提案してもらう</h2>
+    <p class="muted">写真の画像は送らず、スプレッドシートに記録された 撮影日・撮影地・タグ・場面・説明 をもとに提案します。</p>
+    <fieldset class="radios">
+      <legend>提案の対象にする写真</legend>
+      <label><input type="radio" name="scope" value="ai" checked> AIで解析した写真だけ（<span id="sg-ai-n">0</span>枚）</label>
+      <label><input type="radio" name="scope" value="all"> 「解析済みにする」にした写真も含める（<span id="sg-all-n">0</span>枚）</label>
+    </fieldset>
+    <p class="muted small">「解析済みにする（AI解析の対象から外す）」にした写真は、手で入れたタグや説明がある分だけ提案に使われます。</p>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-close>やめる</button>
+      <button type="submit" class="btn primary">提案してもらう</button>
     </div>
   </form>
 </dialog>
@@ -546,7 +563,7 @@
 <div id="busy" class="busy" hidden><div class="busy-card"><span class="spinner" aria-hidden="true"></span><p id="busy-msg"></p></div></div>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
-<script src="config.js?v=1.6.0"></script>
-<script src="app.js?v=1.6.0"></script>
+<script src="config.js?v=1.7.0"></script>
+<script src="app.js?v=1.7.0"></script>
 </body>
 </html>

@@ -1,6 +1,6 @@
 /**
  * おもいで付箋ボード (omoide-fusen) — Google Apps Script バックエンド
- * Version 1.6.0
+ * Version 1.7.0
  *
  * ── スクリプトプロパティ ──────────────────────────────
  *   GEMINI_API_KEY          (必須) Google AI Studio の API キー
@@ -26,7 +26,7 @@
  *   ※ コードを変更したら「デプロイを管理 > 編集 > 新バージョン」で再デプロイ
  */
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 
 const DEF = {
   users:    { name: 'Users',    cols: ['email', 'nickname', 'passwordHash', 'salt', 'isFirstLogin', 'failCount', 'lockedUntil', 'folderId', 'homeFolderId', 'createdAt', 'lastLoginAt'] },
@@ -514,6 +514,8 @@ function photoPub_(r) {
     tags: parseArr_(r.tags), mood: r.mood, scene: r.scene,
     description: r.description, status: r.status || 'pending',
     dupOf: r.dupOf || '',
+    // AI解析したか（analyzedAt は AI 解析のときだけ記録される）。手で「解析済みにする」にした写真は manual
+    analyzedBy: r.status === 'done' ? (r.analyzedAt ? 'ai' : 'manual') : '',
   };
 }
 
@@ -1364,10 +1366,16 @@ function matchTheme_(u, title, mode, excluded) {
   return { photoIds: ids, cover, method: 'ai' };
 }
 
+/**
+ * AIにテーマを提案してもらう
+ *  画像は送らず、スプレッドシート（Photos シート）の 日付・撮影地・タグ・場面・説明 だけをもとに提案する
+ *  includeManual: true のとき、手で「解析済みにする」にした写真（AI解析していない写真）も対象にする
+ */
 function suggestThemes_(req, u) {
-  const ph = rows_(DEF.photos).filter(r => r.email === u.email && r.status === 'done')
+  const includeManual = !!req.includeManual;
+  const ph = rows_(DEF.photos).filter(r => r.email === u.email && r.status === 'done' && (r.analyzedAt || includeManual))
     .sort((a, b) => String(a.takenAt).localeCompare(String(b.takenAt)));
-  if (ph.length < 3) throw err_('テーマを提案するには、解析済みの写真が3枚以上必要です。');
+  if (ph.length < 3) throw err_('テーマを提案するには、対象の写真が3枚以上必要です。' + (includeManual ? '' : '「解析済みにした写真も含める」を選ぶと増やせます。'));
   const list = sampleEven_(ph, 300);
   const valid = {};
   list.forEach(p => { valid[p.fileId] = true; });
