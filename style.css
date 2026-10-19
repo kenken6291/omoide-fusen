@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — style.css  v1.7.2 */
+/* おもいで付箋ボード — style.css  v1.7.3 */
 
 :root {
   --board: #E9EDF1;
@@ -510,7 +510,17 @@ body.readonly .note { cursor: pointer; }
 .dlg { overflow: visible; }
 .dlg form { max-height: calc(92vh - 8px); overflow-y: auto; overflow-x: hidden; }
 .photo-edit > *, .row2 > *, .row > input, .row > select { min-width: 0; }
-.pe-img { align-self: start; position: sticky; top: 0; }
+.pe-img { align-self: start; }
+/* パソコン（2列）のときだけ写真を上に固定。スマホ（1列）では固定しないので入力欄に重ならない */
+@media (min-width: 641px) { .pe-img { position: sticky; top: 0; } }
+@media (max-width: 640px) {
+  .pe-img { position: static; min-height: 0; }
+  .pe-img img { max-height: 34vh; }
+  .dlg form { padding: 16px; }
+  .photo-edit { gap: 12px; }
+  .check-row { align-items: flex-start; line-height: 1.5; }
+  .check-row input { flex: none; margin-top: 2px; }
+}
 .pe-themes .row { flex-wrap: wrap; }
 .pe-themes .row select { flex: 1 1 160px; }
 .maps-paste { background: #F1F5FB; border-radius: 10px; padding: 10px 12px 4px; margin: 0 0 14px; }
