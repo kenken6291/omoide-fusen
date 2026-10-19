@@ -11,7 +11,9 @@
 <link rel="preconnect" href="https://script.google.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Klee+One:wght@400;600&family=Shippori+Mincho:wght@500;700&family=Zen+Maru+Gothic:wght@500;700&display=swap">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%93%8C%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="style.css?v=1.5.0">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="style.css?v=1.6.0">
 </head>
 <body>
 
@@ -149,6 +151,11 @@
   </header>
 
   <div class="lib-scroll">
+    <div id="share-bar" class="share-bar" hidden>
+      <p><strong>Googleマップから位置を受け取りました</strong><br><span id="share-text"></span></p>
+      <p class="muted small">写真を選んで「情報を一括修正」を押すか、写真を1枚開くと、緯度・経度と撮影地が自動で入ります。</p>
+      <button type="button" class="link" id="share-cancel">この位置を使わない</button>
+    </div>
     <details class="lib-folder">
       <summary>読み込むフォルダ：<strong id="folder-label">—</strong></summary>
       <p class="muted small">ドライブのフォルダを指定すると、その中（2階層下まで）の写真を読み込みます。「写真を追加」「フォルダごと追加」の写真もこのフォルダに保存されます。</p>
@@ -539,7 +546,7 @@
 <div id="busy" class="busy" hidden><div class="busy-card"><span class="spinner" aria-hidden="true"></span><p id="busy-msg"></p></div></div>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
-<script src="config.js?v=1.5.0"></script>
-<script src="app.js?v=1.5.0"></script>
+<script src="config.js?v=1.6.0"></script>
+<script src="app.js?v=1.6.0"></script>
 </body>
 </html>

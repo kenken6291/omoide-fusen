@@ -1,6 +1,6 @@
 /**
  * おもいで付箋ボード (omoide-fusen) — Google Apps Script バックエンド
- * Version 1.4.1
+ * Version 1.6.0
  *
  * ── スクリプトプロパティ ──────────────────────────────
  *   GEMINI_API_KEY          (必須) Google AI Studio の API キー
@@ -26,7 +26,7 @@
  *   ※ コードを変更したら「デプロイを管理 > 編集 > 新バージョン」で再デプロイ
  */
 
-const APP_VERSION = '1.4.1';
+const APP_VERSION = '1.6.0';
 
 const DEF = {
   users:    { name: 'Users',    cols: ['email', 'nickname', 'passwordHash', 'salt', 'isFirstLogin', 'failCount', 'lockedUntil', 'folderId', 'homeFolderId', 'createdAt', 'lastLoginAt'] },
@@ -1024,14 +1024,28 @@ function geocode_(req) {
     if (isNaN(lat) || isNaN(lng)) throw err_('緯度・経度が数字ではありません。');
     return { lat, lng, place: reverseGeocode_(lat, lng) };
   }
-  let q = String(req.query || '').trim().slice(0, 1000);
-  if (!q) throw err_('貼り付けた内容が空です。');
-  if (/^https?:\/\/(maps\.app\.goo\.gl|goo\.gl\/maps|g\.co\/kgs|maps\.google\.|www\.google\.[^/]+\/maps)/i.test(q)) q = expandUrl_(q);
-  const c = parseLatLng_(q);
+  const text = String(req.query || '').trim().slice(0, 2000);
+  if (!text) throw err_('貼り付けた内容が空です。');
+  // 1) 文章のどこかに座標があればそれを使う（Googleマップの「共有」は 座標・住所・リンク の複数行）
+  let c = parseLatLng_(text);
   if (c) return { lat: c.lat, lng: c.lng, place: reverseGeocode_(c.lat, c.lng) };
-  const pm = q.match(/\/place\/([^/@?]+)/) || q.match(/[?&](?:q|query|destination)=([^&]+)/);
-  if (pm) q = decodeURIComponent(pm[1].replace(/\+/g, ' '));
-  if (/^https?:/i.test(q)) throw err_('このリンクから位置を読み取れませんでした。Googleマップで地点を右クリックして出る「35.xxx, 139.xxx」の数字を貼り付けてください。');
+  // 2) 共有リンク（maps.app.goo.gl など）を展開して座標を探す
+  const urlM = text.match(/https?:\/\/[^\s<>"'）)]+/i);
+  let expanded = '';
+  if (urlM) {
+    expanded = /^https?:\/\/(maps\.app\.goo\.gl|goo\.gl\/maps|g\.co\/kgs|maps\.google\.|www\.google\.[^/]+\/maps|google\.[^/]+\/maps)/i.test(urlM[0]) ? expandUrl_(urlM[0]) : urlM[0];
+    c = parseLatLng_(expanded);
+    if (c) return { lat: c.lat, lng: c.lng, place: reverseGeocode_(c.lat, c.lng) };
+  }
+  // 3) 住所・地名で探す（共有テキストの住所の行、またはリンク内の地名）
+  let q = '';
+  const lines = text.split(/\r?\n/).map(x => x.trim()).filter(x => x && !/^https?:/i.test(x));
+  q = lines.find(x => /〒|[都道府県]/.test(x)) || lines.sort((a, b) => b.length - a.length)[0] || '';
+  if (!q && expanded) {
+    const pm = expanded.match(/\/place\/([^/@?]+)/) || expanded.match(/\/search\/([^/@?]+)/) || expanded.match(/[?&](?:q|query|destination)=([^&]+)/);
+    if (pm) { try { q = decodeURIComponent(pm[1].replace(/\+/g, ' ')); } catch (e) { q = pm[1]; } }
+  }
+  if (!q) throw err_('このリンクから位置を読み取れませんでした。Googleマップの「共有」で出る文章をそのまま貼り付けるか、地点を長押し（右クリック）して出る「35.xxx, 139.xxx」を貼り付けてください。');
   q = q.replace(/^日本、\s*/, '').replace(/^〒?\s*[0-9０-９]{3}[-－ー]?[0-9０-９]{4}\s*/, '').trim();
   const res = forwardGeocode_(q);
   if (!res) throw err_('この住所の位置が見つかりませんでした。住所を短くするか、座標を貼り付けてください。');
@@ -1039,12 +1053,15 @@ function geocode_(req) {
   return { lat: Number(loc.lat), lng: Number(loc.lng), place: placeFromResult_(res), formatted: res.formatted_address };
 }
 
+/** 文章・URL のどこかにある緯度・経度を読み取る */
 function parseLatLng_(s) {
   s = String(s || '');
-  const m = s.match(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/) ||
-    s.match(/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/) ||
-    s.match(/[?&](?:q|query|ll|center|destination)=(-?\d+(?:\.\d+)?)(?:,|%2C)\s*(-?\d+(?:\.\d+)?)/i) ||
-    s.match(/^\s*\(?\s*(-?\d{1,2}(?:\.\d+)?)\s*[,，、\s]\s*(-?\d{1,3}(?:\.\d+)?)\s*\)?\s*$/);
+  let d = s;
+  try { d = decodeURIComponent(s.replace(/\+/g, ' ')); } catch (e) { d = s.replace(/\+/g, ' ').replace(/%2C/gi, ','); }
+  const m = d.match(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/) ||
+    d.match(/@(-?\d+\.\d+),\s*(-?\d+\.\d+)/) ||
+    d.match(/(-?\d{1,2}\.\d{3,})\s*[,，、]\s*(-?\d{1,3}\.\d{3,})/) ||
+    d.match(/^\s*\(?\s*(-?\d{1,2}(?:\.\d+)?)\s*[,，、\s]\s*(-?\d{1,3}(?:\.\d+)?)\s*\)?\s*$/);
   if (!m) return null;
   const lat = Number(m[1]), lng = Number(m[2]);
   if (isNaN(lat) || isNaN(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;

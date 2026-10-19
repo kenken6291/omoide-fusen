@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — app.js  v1.5.0 */
+/* おもいで付箋ボード — app.js  v1.6.0 */
 (() => {
   'use strict';
 
@@ -389,6 +389,7 @@
   async function enterApp() {
     $('#auth').hidden = true; $('#app').hidden = false;
     await loadBoard();
+    afterBoardLoaded();
   }
   async function loadBoard() {
     loadView(); applyView();
@@ -1010,6 +1011,7 @@
     document.body.classList.add('lock');
     renderFolder();
     renderPhotoGrid();
+    renderShareBar();
   }
   function closeLibrary() {
     if (lib.hidden) return;
@@ -1294,6 +1296,7 @@
     loadImg(fileId, 'mid', true).then(u => { if (PE && PE.fileId === fileId) img.src = u; }).catch(() => {});
     renderPeThemes();
     $('#dlg-photo').showModal();
+    applySharedLoc($('#dlg-photo form'));
   }
   function fillPhotoForm(p) {
     const f = $('#dlg-photo form');
@@ -1393,6 +1396,7 @@
         photo = (m.photos || [])[0] || photo;
       }
       mergePhotos([photo]);
+      if (f.dataset.shared === '1') clearSharedLoc();
       $('#dlg-photo').close();
       if (PE.onSaved) PE.onSaved(photo);
       renderPhotoGrid();
@@ -1405,9 +1409,11 @@
    * ============================================================ */
   function parseLatLng(s) {
     s = String(s || '').trim();
+    try { s = decodeURIComponent(s.replace(/\+/g, ' ')); } catch (_) { s = s.replace(/\+/g, ' ').replace(/%2C/gi, ','); }
+    // Googleマップの「共有」は「座標／住所／リンク」の複数行。文章のどこかにある座標も読み取る
     const m = s.match(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/) ||
-      s.match(/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/) ||
-      s.match(/[?&](?:q|query|ll|center|destination)=(-?\d+(?:\.\d+)?)(?:,|%2C)\s*(-?\d+(?:\.\d+)?)/i) ||
+      s.match(/@(-?\d+\.\d+),\s*(-?\d+\.\d+)/) ||
+      s.match(/(-?\d{1,2}\.\d{3,})\s*[,，、]\s*(-?\d{1,3}\.\d{3,})/) ||
       s.match(/^\(?\s*(-?\d{1,2}(?:\.\d+)?)\s*[,，、\s]\s*(-?\d{1,3}(?:\.\d+)?)\s*\)?$/);
     let lat, lng;
     if (m) {
@@ -1486,6 +1492,55 @@
     if (e.key === 'Enter' && e.target && e.target.name === 'mapsPaste') { e.preventDefault(); convertMaps(e.target.form); }
   });
 
+
+  /* ============================================================
+   * Googleマップの「共有」から受け取った位置
+   *  - ホーム画面に追加したアプリは、Googleマップの共有先に「おもいで付箋」が出る（Android）
+   *  - 受け取った位置は、次に開く写真の情報・一括修正の画面に自動で入る
+   * ============================================================ */
+  const SHARE_KEY = 'omoide.share';
+  S.sharedLoc = sessionStorage.getItem(SHARE_KEY) || '';
+  function receiveShare() {
+    const q = new URLSearchParams(location.search);
+    const parts = ['share_title', 'share_text', 'share_url'].map(k => (q.get(k) || '').trim()).filter(Boolean);
+    if (!parts.length) return;
+    S.sharedLoc = uniq(parts).join('\n');
+    sessionStorage.setItem(SHARE_KEY, S.sharedLoc);
+    history.replaceState(null, '', location.pathname);
+  }
+  function renderShareBar() {
+    const bar = $('#share-bar');
+    bar.hidden = !S.sharedLoc || S.readOnly;
+    if (bar.hidden) return;
+    const c = parseLatLng(S.sharedLoc);
+    const addr = S.sharedLoc.split('\n').find(x => /〒|[都道府県]/.test(x)) || '';
+    $('#share-text').textContent = c
+      ? `緯度 ${c.lat.toFixed(6)} ／ 経度 ${c.lng.toFixed(6)}${addr ? `　${addr}` : ''}`
+      : S.sharedLoc.replace(/\n/g, '　');
+  }
+  function clearSharedLoc() {
+    S.sharedLoc = '';
+    sessionStorage.removeItem(SHARE_KEY);
+    renderShareBar();
+  }
+  function applySharedLoc(form) {
+    form.dataset.shared = '';
+    if (!S.sharedLoc || S.readOnly) return;
+    const inp = form.elements.namedItem('mapsPaste');
+    if (!inp) return;
+    inp.value = S.sharedLoc;
+    form.dataset.shared = '1';
+    convertMaps(form);
+  }
+  $('#share-cancel').addEventListener('click', () => { clearSharedLoc(); toast('受け取った位置を取り消しました。'); });
+  function afterBoardLoaded() {
+    if (!S.sharedLoc || S.readOnly) return;
+    openLibrary();
+    if (!LIB.selecting) setSelecting(true);
+    renderShareBar();
+    toast('Googleマップの位置を受け取りました。写真を選んで「情報を一括修正」を押してください。');
+  }
+
   /* ============================================================
    * 写真の情報の一括修正
    * ============================================================ */
@@ -1516,6 +1571,7 @@
     $('#bulk-remove-theme').innerHTML = '<option value="">外さない</option>' +
       S.themes.filter(t => t.photoIds.some(id => ids.includes(id))).map(t => `<option value="${esc(t.themeId)}">${esc(t.title)}</option>`).join('');
     $('#dlg-bulk').showModal();
+    applySharedLoc(f);
   }
   // 入力したら自動で「変更する」にチェック
   $('#dlg-bulk form').addEventListener('input', e => {
@@ -1588,6 +1644,7 @@
         }
       }
       $('#dlg-bulk').close();
+      if (f.dataset.shared === '1' && ['lat', 'lng'].some(k => f.elements.namedItem('use_' + k).checked)) clearSharedLoc();
       if (BULK_DONE) BULK_DONE();
       toast(`${BULK.length}枚の写真を修正しました。`);
     } catch (err) {
@@ -2712,6 +2769,8 @@
    * 起動
    * ============================================================ */
   $$('.ver').forEach(el => { el.textContent = VERSION; });
+  receiveShare();
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   document.title = CFG.APP_NAME || document.title;
   if (S.token && S.user) {
     if (S.user.isFirstLogin) showAuth('change'); else enterApp();
