@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — app.js  v1.4.0 */
+/* おもいで付箋ボード — app.js  v1.5.0 */
 (() => {
   'use strict';
 
@@ -1492,10 +1492,13 @@
   let BULK = [];
   const BULK_TEXT = ['takenAt', 'place', 'lat', 'lng', 'tags', 'scene', 'mood', 'description'];
   const BULK_LABEL = { takenAt: '撮影日時', place: '撮影地', lat: '緯度', lng: '経度', tags: 'タグ', scene: '場面', mood: '雰囲気', description: '説明' };
-  $('#sel-bulk').addEventListener('click', () => {
-    const ids = [...LIB.selected];
+  let BULK_DONE = null;
+  $('#sel-bulk').addEventListener('click', () => openBulk([...LIB.selected], () => setSelecting(false)));
+  /** 一括修正画面を開く（写真ライブラリ・付箋の一覧の両方から使う） */
+  function openBulk(ids, done) {
     if (!ids.length) return toast('写真を選んでください。', 'warn');
     BULK = ids;
+    BULK_DONE = done || null;
     const f = $('#dlg-bulk form');
     f.reset();
     resetMapsPaste(f);
@@ -1513,7 +1516,7 @@
     $('#bulk-remove-theme').innerHTML = '<option value="">外さない</option>' +
       S.themes.filter(t => t.photoIds.some(id => ids.includes(id))).map(t => `<option value="${esc(t.themeId)}">${esc(t.title)}</option>`).join('');
     $('#dlg-bulk').showModal();
-  });
+  }
   // 入力したら自動で「変更する」にチェック
   $('#dlg-bulk form').addEventListener('input', e => {
     const n = e.target.name === 'tagMode' ? 'tags' : e.target.name;
@@ -1585,7 +1588,7 @@
         }
       }
       $('#dlg-bulk').close();
-      setSelecting(false);
+      if (BULK_DONE) BULK_DONE();
       toast(`${BULK.length}枚の写真を修正しました。`);
     } catch (err) {
       toast(err.message, 'error');
@@ -1948,10 +1951,13 @@
   const stage = $('#v-stage');
   const controls = $('#v-controls');
 
-  function openViewer(t) {
+  function openViewer(t, mode) {
     if (!t) return;
     const list = t.photoIds.filter(isActive).map(photo);
-    if (!list.length) return toast('このテーマには写真がありません。「写真を探し直す」を試してください。', 'warn');
+    if (!list.length) {
+      if (S.readOnly) return toast('このテーマには写真がありません。', 'warn');
+      mode = 'grid';
+    }
     V.theme = t; V.list = list; V.current = null; V.comments = new Map();
     $('#v-title').textContent = t.title;
     viewer.hidden = false;
@@ -1964,7 +1970,7 @@
       });
       renderSide();
     }).catch(() => {});
-    setMode('random');
+    setMode(mode || 'random');
   }
   function closeViewer() {
     if (viewer.hidden) return;
@@ -1992,8 +1998,9 @@
     viewer.dataset.mode = m;
     $$('.mode-tabs [data-mode]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.mode === m)));
     stage.innerHTML = ''; stage.className = 'v-stage'; controls.innerHTML = '';
-    if (m === 'cinema') viewer.classList.remove('side-open');
-    ({ random: startRandom, album: startAlbum, cinema: startCinema })[m](V.session);
+    if (m === 'cinema' || m === 'grid') viewer.classList.remove('side-open');
+    if (m !== 'grid' && !V.list.length) { setMode('grid'); return; }
+    ({ grid: startGrid, random: startRandom, album: startAlbum, cinema: startCinema })[m](V.session);
   }
   function sideToggleBtn() {
     const b = document.createElement('button');
@@ -2115,6 +2122,167 @@
     list.unshift(c);
     V.comments.set(c.fileId, list);
   }
+
+  /* ---------- モード0: 一覧（サムネイル・選択・一括修正・外す・追加） ---------- */
+  function refreshViewerList() {
+    const t = theme(V.theme.themeId);
+    if (t) V.theme = t;
+    V.list = V.theme.photoIds.filter(isActive).map(photo);
+  }
+  function startGrid(sess) {
+    stage.classList.add('gridview');
+    const ro = S.readOnly;
+    const sel = new Set();
+    const alive = () => sess === V.session;
+    let obs = null;
+    stage.innerHTML = '<p class="vg-info"></p><div class="vg-grid"></div>';
+    const grid = $('.vg-grid', stage);
+
+    const allBtn = ctrlBtn('すべて選ぶ', () => { V.list.forEach(p => sel.add(p.fileId)); render(); });
+    const clearBtn = ctrlBtn('選択を解除', () => { sel.clear(); render(); });
+    const bulkBtn = ctrlBtn('情報を一括修正', () => {
+      openBulk([...sel], () => { if (!alive()) return; sel.clear(); refreshViewerList(); render(); });
+    });
+    const outBtn = ctrlBtn('この付箋から外す', async () => {
+      const ids = [...sel];
+      if (!ids.length) return;
+      if (!confirm(`選んだ${ids.length}枚を「${V.theme.title}」から外しますか？\n（外した写真は「写真を探し直す」でも戻りません。写真ファイルは消えません）`)) return;
+      busy('付箋から外しています…');
+      try {
+        const r = await api('assignPhotos', { themeId: V.theme.themeId, fileIds: ids, mode: 'remove' });
+        upsertTheme(r.theme);
+        sel.clear(); refreshViewerList(); render();
+        toast(`${ids.length}枚を付箋から外しました。`);
+      } catch (err) { toast(err.message, 'error'); } finally { busy(false); }
+    });
+    const addBtn = ctrlBtn('写真を追加', () => {
+      openPicker(V.theme, () => { if (!alive()) return; refreshViewerList(); render(); });
+    }, 'btn small primary');
+    if (!ro) controls.append(allBtn, clearBtn, bulkBtn, outBtn, addBtn);
+
+    function update() {
+      $('.vg-info', stage).textContent = ro ? `${V.list.length}枚` : `${V.list.length}枚　${sel.size}枚を選択中`;
+      bulkBtn.disabled = outBtn.disabled = clearBtn.disabled = !sel.size;
+    }
+    function render() {
+      if (obs) obs.disconnect();
+      const list = chrono(V.list);
+      grid.innerHTML = list.length ? list.map(p => {
+        const on = sel.has(p.fileId);
+        return `<div class="vg-item${on ? ' sel' : ''}" data-file="${esc(p.fileId)}"${ro ? '' : ` role="checkbox" tabindex="0" aria-checked="${on}"`}>
+          <span class="im"><img alt="" hidden></span>
+          ${ro ? '' : '<span class="ck"></span>'}
+          ${p.fileId === V.theme.coverFileId ? '<span class="cv">表紙</span>' : ''}
+          ${ro ? '' : '<button type="button" class="ed" aria-label="写真の情報を開く">✎</button>'}
+          <span class="cap">${esc([fmtDate(p.takenAt), p.place].filter(Boolean).join('　') || p.fileName || '')}</span>
+        </div>`;
+      }).join('') : '<p class="vg-empty">この付箋には写真がありません。「写真を追加」で入れられます。</p>';
+      obs = new IntersectionObserver(entries => {
+        entries.forEach(en => {
+          if (!en.isIntersecting) return;
+          obs.unobserve(en.target);
+          const img = en.target.querySelector('img');
+          loadImg(en.target.dataset.file, 'thumb').then(u => { img.src = u; img.hidden = false; }).catch(() => {});
+        });
+      }, { root: stage, rootMargin: '300px' });
+      $$('.vg-item', grid).forEach(el => obs.observe(el));
+      update();
+    }
+    function toggle(el) {
+      const id = el.dataset.file;
+      sel.has(id) ? sel.delete(id) : sel.add(id);
+      const on = sel.has(id);
+      el.classList.toggle('sel', on);
+      el.setAttribute('aria-checked', String(on));
+      update();
+    }
+    grid.addEventListener('click', e => {
+      const el = e.target.closest('.vg-item');
+      if (!el || ro) return;
+      if (e.target.closest('.ed')) {
+        openPhotoEdit(el.dataset.file, () => { if (!alive()) return; refreshViewerList(); render(); });
+        return;
+      }
+      toggle(el);
+    });
+    grid.addEventListener('keydown', e => {
+      const el = e.target.closest('.vg-item');
+      if (el && (e.key === ' ' || e.key === 'Enter') && !e.target.closest('.ed')) { e.preventDefault(); toggle(el); }
+    });
+    V.cleanup = () => { if (obs) obs.disconnect(); };
+    render();
+  }
+
+  /* 付箋に写真を追加（ライブラリから選ぶ） */
+  let PICK = null;
+  let pickObs = null;
+  function openPicker(t, done) {
+    PICK = { themeId: t.themeId, done, sel: new Set() };
+    $('#pick-title').textContent = `「${t.title}」に写真を追加`;
+    $('#pick-q').value = '';
+    $('#pick-filter').value = 'all';
+    renderPick();
+    $('#dlg-pick').showModal();
+  }
+  function renderPick() {
+    const t = theme(PICK.themeId);
+    const words = $('#pick-q').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const orphanOnly = $('#pick-filter').value === 'orphan';
+    const mc = membershipCount();
+    const list = chrono(S.photos).reverse().filter(p => {
+      if (p.status === 'dup' || t.photoIds.includes(p.fileId)) return false;
+      if (orphanOnly && mc.get(p.fileId)) return false;
+      if (!words.length) return true;
+      const text = [p.fileName, p.takenAt, p.place, (p.tags || []).join(' '), p.scene, p.mood, p.description].join(' ').toLowerCase();
+      return words.every(w => text.includes(w));
+    });
+    const grid = $('#pick-grid');
+    if (pickObs) pickObs.disconnect();
+    grid.innerHTML = list.length ? list.map(p => `
+      <div class="vg-item light${PICK.sel.has(p.fileId) ? ' sel' : ''}" data-file="${esc(p.fileId)}" role="checkbox" tabindex="0" aria-checked="${PICK.sel.has(p.fileId)}">
+        <span class="im"><img alt="" hidden></span><span class="ck"></span>
+        <span class="cap">${esc([fmtDate(p.takenAt), p.place].filter(Boolean).join('　') || p.fileName || '')}</span>
+      </div>`).join('') : '<p class="muted">追加できる写真がありません。</p>';
+    pickObs = new IntersectionObserver(entries => {
+      entries.forEach(en => {
+        if (!en.isIntersecting) return;
+        pickObs.unobserve(en.target);
+        const img = en.target.querySelector('img');
+        loadImg(en.target.dataset.file, 'thumb').then(u => { img.src = u; img.hidden = false; }).catch(() => {});
+      });
+    }, { root: grid, rootMargin: '300px' });
+    $$('.vg-item', grid).forEach(el => pickObs.observe(el));
+    $('#pick-count').textContent = `${list.length}枚から選べます　${PICK.sel.size}枚を選択中`;
+  }
+  let pickTimer;
+  $('#pick-q').addEventListener('input', () => { clearTimeout(pickTimer); pickTimer = setTimeout(renderPick, 200); });
+  $('#pick-filter').addEventListener('change', renderPick);
+  function pickToggle(el) {
+    const id = el.dataset.file;
+    PICK.sel.has(id) ? PICK.sel.delete(id) : PICK.sel.add(id);
+    const on = PICK.sel.has(id);
+    el.classList.toggle('sel', on);
+    el.setAttribute('aria-checked', String(on));
+    $('#pick-count').textContent = $('#pick-count').textContent.replace(/\d+枚を選択中/, `${PICK.sel.size}枚を選択中`);
+  }
+  $('#pick-grid').addEventListener('click', e => { const el = e.target.closest('.vg-item'); if (el) pickToggle(el); });
+  $('#pick-grid').addEventListener('keydown', e => {
+    const el = e.target.closest('.vg-item');
+    if (el && (e.key === ' ' || e.key === 'Enter')) { e.preventDefault(); pickToggle(el); }
+  });
+  $('#dlg-pick form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const ids = [...PICK.sel];
+    if (!ids.length) return toast('追加する写真を選んでください。', 'warn');
+    busy(`${ids.length}枚を付箋に入れています…`);
+    try {
+      const r = await api('assignPhotos', { themeId: PICK.themeId, fileIds: ids, mode: 'add' });
+      upsertTheme(r.theme);
+      $('#dlg-pick').close();
+      if (PICK.done) PICK.done();
+      toast(`「${r.theme.title}」に${ids.length}枚を入れました。`);
+    } catch (err) { toast(err.message, 'error'); } finally { busy(false); }
+  });
 
   /* ---------- モード1: ランダム ---------- */
   function startRandom(sess) {

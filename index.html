@@ -11,7 +11,7 @@
 <link rel="preconnect" href="https://script.google.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Klee+One:wght@400;600&family=Shippori+Mincho:wght@500;700&family=Zen+Maru+Gothic:wght@500;700&display=swap">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%93%8C%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="style.css?v=1.4.0">
+<link rel="stylesheet" href="style.css?v=1.5.0">
 </head>
 <body>
 
@@ -420,6 +420,25 @@
   </form>
 </dialog>
 
+<dialog id="dlg-pick" class="dlg wide">
+  <form>
+    <h2 id="pick-title">写真を追加</h2>
+    <div class="row pick-tools">
+      <input type="search" id="pick-q" placeholder="タグ・場所・説明・日付で絞り込み" aria-label="絞り込み">
+      <select id="pick-filter" aria-label="表示する写真">
+        <option value="all">すべての写真</option>
+        <option value="orphan">どの付箋にも入っていない写真</option>
+      </select>
+    </div>
+    <p class="muted small" id="pick-count"></p>
+    <div id="pick-grid" class="pick-grid"></div>
+    <div class="dlg-actions">
+      <button type="button" class="btn" data-close>やめる</button>
+      <button type="submit" class="btn primary">選んだ写真を入れる</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="dlg-dup" class="dlg wide">
   <form>
     <h2>重複している写真</h2>
@@ -503,6 +522,7 @@
   <header class="viewer-bar">
     <h2 id="v-title"></h2>
     <div class="mode-tabs" role="tablist" aria-label="表示モード">
+      <button role="tab" data-mode="grid">一覧</button>
       <button role="tab" data-mode="random">ランダム</button>
       <button role="tab" data-mode="album">アルバム</button>
       <button role="tab" data-mode="cinema">走馬灯</button>
@@ -519,7 +539,7 @@
 <div id="busy" class="busy" hidden><div class="busy-card"><span class="spinner" aria-hidden="true"></span><p id="busy-msg"></p></div></div>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
-<script src="config.js?v=1.4.0"></script>
-<script src="app.js?v=1.4.0"></script>
+<script src="config.js?v=1.5.0"></script>
+<script src="app.js?v=1.5.0"></script>
 </body>
 </html>
