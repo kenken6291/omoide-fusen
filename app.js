@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — app.js  v1.7.1 */
+/* おもいで付箋ボード — app.js  v1.7.2 */
 (() => {
   'use strict';
 
@@ -203,16 +203,22 @@
       if (RO_ACTIONS.has(action)) body.asOwner = S.viewing.email;
       else if (!ACCOUNT_ACTIONS.has(action)) throw new Error('閲覧のみのボードでは、この操作はできません。');
     }
-    let res;
+    let r, text, res;
     try {
-      const r = await fetch(url, {
+      r = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify(body),
       });
-      res = await r.json();
+      text = await r.text();
     } catch (_) {
-      throw new Error('サーバーに接続できません。GASのURLと、デプロイの「アクセスできるユーザー：全員」を確認してください。');
+      if (!navigator.onLine) throw new Error('インターネットにつながっていません。通信状態を確認してください。');
+      throw new Error(`サーバーに接続できません（接続先：${urlLabel(url)}）。設定画面の「接続を確かめる」で原因を調べられます。`);
+    }
+    try { res = JSON.parse(text); }
+    catch (_) {
+      const title = ((text || '').match(/<title>([^<]*)<\/title>/i) || [])[1] || String(text || '').replace(/\s+/g, ' ').slice(0, 60);
+      throw new Error(`GASから想定外の応答がありました（${r.status} ${title}）。GASエディタの「実行数」でエラーを確認し、新バージョンで再デプロイしてください。`);
     }
     if (!res.ok) {
       if (res.code === 'AUTH') { clearSession(); showAuth('login'); }
@@ -956,6 +962,7 @@
   async function openSettings() {
     const d = $('#dlg-settings');
     if (d.open) return;
+    $('#test-result').hidden = true;
     d.querySelector('[name=gasUrl]').value = localStorage.getItem(KEY.gas) || '';
     d.querySelector('[name=gasUrl]').placeholder = CFG.GAS_URL || 'https://script.google.com/macros/s/…/exec';
     voiceSel.value = voice();
@@ -983,14 +990,39 @@
     $('#dlg-settings').close();
     toast('設定を保存しました。');
   });
+  /* 接続の診断：GET（doGet）と POST（doPost）を順に試して、どこで止まっているかを表示 */
   $('#btn-test').addEventListener('click', async () => {
     const url = $('#dlg-settings [name=gasUrl]').value.trim() || CFG.GAS_URL;
+    const out = $('#test-result');
+    const lines = [`接続先：${urlLabel(url)}（${$('#dlg-settings [name=gasUrl]').value.trim() ? '設定画面のURL' : 'config.js のURL'}）`];
+    const show = cls => { out.hidden = false; out.className = 'test-result ' + cls; out.textContent = lines.join('\n'); };
+    lines.push('確認しています…'); show('');
+    lines.pop();
+    let getOk = false;
+    try {
+      const r = await fetch(url, { method: 'GET' });
+      const t = await r.text();
+      try { const j = JSON.parse(t); getOk = !!j.ok; lines.push(`① 読み取り（doGet）：OK（サーバー v${j.version || '?'}）`); }
+      catch (_) { lines.push(`① 読み取り（doGet）：JSONではない応答（${r.status}）。GASのエラーページか、ログインが必要な状態です。`); }
+    } catch (_) {
+      lines.push('① 読み取り（doGet）：つながりません。URLが古い（別のデプロイ）か、「アクセスできるユーザー」が「全員」になっていません。');
+    }
     try {
       const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ action: 'ping' }) });
-      const j = await r.json();
-      toast(j.ok ? `接続できました（サーバー v${j.version}）。` : 'サーバーから応答はありましたが、エラーでした。', j.ok ? 'info' : 'warn');
-    } catch (_) { toast('接続できませんでした。URLとデプロイ設定を確認してください。', 'error'); }
+      const t = await r.text();
+      try { const j = JSON.parse(t); lines.push(j.ok ? '② 送信（doPost）：OK。ログインできる状態です。' : `② 送信（doPost）：エラー「${j.error}」`); }
+      catch (_) { lines.push(`② 送信（doPost）：JSONではない応答（${r.status}）。Code.gs の実行時エラーの可能性があります。`); }
+    } catch (_) {
+      lines.push(getOk ? '② 送信（doPost）：つながりません。Code.gs を保存後に「新バージョン」で再デプロイしたか確認してください。' : '② 送信（doPost）：つながりません。');
+    }
+    const ok = lines.some(l => l.startsWith('② 送信（doPost）：OK'));
+    if (!ok) lines.push('→ ブラウザの新しいタブで上の接続先URLを直接開くと、GAS側のエラー内容が表示されます。');
+    show(ok ? 'ok' : 'ng');
   });
+  function urlLabel(u) {
+    const m = String(u || '').match(/\/s\/([\w-]+)\/exec/);
+    return m ? `…/s/${m[1].slice(0, 8)}…${m[1].slice(-6)}/exec` : (u || '未設定');
+  }
   $('#btn-clear-cache').addEventListener('click', async () => {
     await IDB.clear();
     imgCache.clear();

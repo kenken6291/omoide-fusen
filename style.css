@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — style.css  v1.7.1 */
+/* おもいで付箋ボード — style.css  v1.7.2 */
 
 :root {
   --board: #E9EDF1;
@@ -596,3 +596,8 @@ body.readonly .note { cursor: pointer; }
 .vg-item:hover .cvb, .vg-item:focus-within .cvb, .vg-item.sel .cvb { opacity: 1; }
 @media (hover: none) { .vg-item .cvb { opacity: 1; } }
 .vg-item .cvb:hover { background: var(--y); }
+
+/* v1.7.2：接続の診断 */
+.test-result { white-space: pre-wrap; font-family: var(--ui); font-size: .85rem; background: #F4F6F9; border-radius: 8px; padding: 10px 12px; margin: 0 0 8px; }
+.test-result.ok { background: #EAF6E4; }
+.test-result.ng { background: #FDECEC; }
