@@ -1,6 +1,6 @@
 /**
  * おもいで付箋ボード (omoide-fusen) — Google Apps Script バックエンド
- * Version 1.4.0
+ * Version 1.4.1
  *
  * ── スクリプトプロパティ ──────────────────────────────
  *   GEMINI_API_KEY          (必須) Google AI Studio の API キー
@@ -26,7 +26,7 @@
  *   ※ コードを変更したら「デプロイを管理 > 編集 > 新バージョン」で再デプロイ
  */
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.4.1';
 
 const DEF = {
   users:    { name: 'Users',    cols: ['email', 'nickname', 'passwordHash', 'salt', 'isFirstLogin', 'failCount', 'lockedUntil', 'folderId', 'homeFolderId', 'createdAt', 'lastLoginAt'] },
@@ -616,6 +616,104 @@ function updatePhoto_(req, u) {
     return photoPub_(Object.assign({}, r, fields));
   });
   return { photo };
+}
+
+/**
+ * 重複している写真を探す（MD5が同じ、MD5がなければ ファイル名＋サイズが同じ）
+ * 残す1枚は「付箋に入っている」「解析済み」「先に登録した」ものを優先
+ */
+function findDuplicates_(req, u) {
+  let mine = rows_(DEF.photos).filter(r => r.email === u.email);
+  const missing = mine.filter(r => !r.md5 || !r.fileSize).map(r => r.fileId);
+  if (missing.length) {
+    const metas = driveMetaMany_(missing, 'id,md5Checksum,size');
+    withLock_(() => {
+      const ups = [];
+      rows_(DEF.photos).forEach(r => {
+        const m = r.email === u.email && metas[r.fileId];
+        if (m) ups.push({ row: r._row, obj: { md5: m.md5Checksum || '', fileSize: Number(m.size) || '' } });
+      });
+      patchMany_(DEF.photos, ups);
+    });
+    mine = rows_(DEF.photos).filter(r => r.email === u.email);
+  }
+  const inTheme = {};
+  rows_(DEF.themes).filter(t => t.email === u.email).forEach(t => parseArr_(t.photoIds).forEach(id => { inTheme[id] = (inTheme[id] || 0) + 1; }));
+  const groups = {};
+  mine.forEach(r => {
+    const k = dupKey_(r);
+    if (k) (groups[k] = groups[k] || []).push(r);
+  });
+  const score = r => (r.status !== 'dup' ? 1000 : 0) + (inTheme[r.fileId] ? 100 : 0) + (r.status === 'done' ? 10 : 0);
+  const out = Object.keys(groups).map(k => groups[k]).filter(g => g.length > 1).map(g => {
+    g.sort((a, b) => score(b) - score(a) || String(a.addedAt).localeCompare(String(b.addedAt)));
+    return { fileIds: g.map(r => r.fileId), exact: g[0].md5 ? true : false };
+  });
+  return { groups: out, photos: mine.map(photoPub_) };
+}
+
+/** 重複として対象から外す（付箋に入っていたら残す写真に置き換える） */
+function markDuplicates_(req, u) {
+  const own = ownSet_(u.email);
+  const items = (Array.isArray(req.items) ? req.items : []).filter(x => x && own[x.fileId] && x.fileId !== x.dupOf).slice(0, SCAN_MAX_FILES);
+  if (!items.length) throw err_('外す写真を選んでください。');
+  const dupOf = {};
+  items.forEach(x => { dupOf[x.fileId] = own[x.dupOf] ? String(x.dupOf) : ''; });
+  const photos = [], themes = [];
+  withLock_(() => {
+    const pu = [];
+    rows_(DEF.photos).forEach(r => {
+      if (r.email !== u.email || dupOf[r.fileId] === undefined) return;
+      const obj = { status: 'dup', dupOf: dupOf[r.fileId] };
+      pu.push({ row: r._row, obj });
+      photos.push(photoPub_(Object.assign({}, r, obj)));
+    });
+    patchMany_(DEF.photos, pu);
+    const tu = [];
+    rows_(DEF.themes).forEach(t => {
+      if (t.email !== u.email) return;
+      const ids = parseArr_(t.photoIds);
+      if (!ids.some(id => dupOf[id] !== undefined)) return;
+      const next = [];
+      ids.forEach(id => {
+        const v = dupOf[id] !== undefined ? dupOf[id] : id;
+        if (v && dupOf[v] === undefined && next.indexOf(v) < 0) next.push(v);
+      });
+      let cover = t.coverFileId;
+      if (dupOf[cover] !== undefined) cover = dupOf[cover];
+      if (next.indexOf(cover) < 0) cover = next[0] || '';
+      const obj = { photoIds: JSON.stringify(next), coverFileId: cover, narration: '', updatedAt: now_() };
+      tu.push({ row: t._row, obj });
+      themes.push(themePub_(Object.assign({}, t, obj)));
+    });
+    patchMany_(DEF.themes, tu);
+  });
+  return { photos, themes };
+}
+
+/** 重複として外した写真を対象に戻す */
+function restoreDuplicates_(req, u) {
+  const want = {};
+  (Array.isArray(req.fileIds) ? req.fileIds : []).forEach(id => { want[id] = true; });
+  const photos = [];
+  withLock_(() => {
+    const pu = [];
+    rows_(DEF.photos).forEach(r => {
+      if (r.email !== u.email || !want[r.fileId] || r.status !== 'dup') return;
+      const analyzed = !!(r.description || parseArr_(r.tags).length);
+      const obj = { status: analyzed ? 'done' : 'pending', dupOf: '' };
+      pu.push({ row: r._row, obj });
+      photos.push(photoPub_(Object.assign({}, r, obj)));
+    });
+    patchMany_(DEF.photos, pu);
+  });
+  return { photos };
+}
+
+function dupSet_(email) {
+  const set = {};
+  rows_(DEF.photos).forEach(r => { if (r.email === email && r.status === 'dup') set[r.fileId] = true; });
+  return set;
 }
 
 /**
