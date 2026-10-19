@@ -11,7 +11,7 @@
 <link rel="preconnect" href="https://script.google.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Klee+One:wght@400;600&family=Shippori+Mincho:wght@500;700&family=Zen+Maru+Gothic:wght@500;700&display=swap">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%93%8C%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="style.css?v=1.3.2">
+<link rel="stylesheet" href="style.css?v=1.4.0">
 </head>
 <body>
 
@@ -190,7 +190,7 @@
     <div class="lib-selbar" id="lib-selbar" hidden>
       <strong id="sel-count">0枚を選択中</strong>
       <button class="btn small primary" id="sel-to-theme">付箋に入れる</button>
-      <button class="btn small" id="sel-bulk">日時・場所を一括修正</button>
+      <button class="btn small" id="sel-bulk">情報を一括修正</button>
       <button class="btn small" id="sel-analyze">AIで解析</button>
       <button class="btn small" id="sel-dup">重複として外す</button>
       <button class="btn small" id="sel-restore" hidden>対象に戻す</button>
@@ -333,11 +333,13 @@
   </form>
 </dialog>
 
-<dialog id="dlg-bulk" class="dlg">
+<dialog id="dlg-bulk" class="dlg wide">
   <form>
-    <h2>撮影日時・場所を一括修正</h2>
+    <h2>写真の情報を一括修正</h2>
     <p id="bulk-count"></p>
-    <p class="muted small">チェックを入れた項目だけ、選んだすべての写真に上書きします。チェックして空欄のままにすると、その項目を消します。</p>
+    <p class="muted small">左のチェックを入れた項目だけ、選んだすべての写真に上書きします（入力すると自動でチェックが入ります）。チェックして空欄のままにすると、その項目を消します。</p>
+
+    <h3 class="bulk-h">撮影日時・場所</h3>
     <div class="bulk-row">
       <label class="bulk-ck"><input type="checkbox" name="use_takenAt" aria-label="撮影日時を変更する"></label>
       <label class="field"><span>撮影日時</span><input name="takenAt" placeholder="2024-08-15 または 2024-08-15 14:30" autocomplete="off"></label>
@@ -352,6 +354,7 @@
         <span class="row"><input name="mapsPaste" autocomplete="off" placeholder="例：35.53105, 139.69684／住所／https://maps.app.goo.gl/…"><button type="button" class="btn small" data-maps-convert>緯度・経度にする</button></span></label>
       <p class="muted small maps-result" aria-live="polite"></p>
     </div>
+    <div class="bulk-2">
     <div class="bulk-row">
       <label class="bulk-ck"><input type="checkbox" name="use_lat" aria-label="緯度を変更する"></label>
       <label class="field"><span>緯度</span><input name="lat" inputmode="decimal" autocomplete="off"></label>
@@ -360,6 +363,56 @@
       <label class="bulk-ck"><input type="checkbox" name="use_lng" aria-label="経度を変更する"></label>
       <label class="field"><span>経度</span><input name="lng" inputmode="decimal" autocomplete="off"></label>
     </div>
+    </div>
+
+    <h3 class="bulk-h">内容</h3>
+    <div class="bulk-row">
+      <label class="bulk-ck"><input type="checkbox" name="use_tags" aria-label="タグを変更する"></label>
+      <div class="field">
+        <span>タグ（「、」区切り）</span>
+        <div class="row">
+          <select name="tagMode" aria-label="タグの変え方">
+            <option value="replace">置き換える</option>
+            <option value="add">追加する</option>
+            <option value="remove">削除する</option>
+          </select>
+          <input name="tags" autocomplete="off" aria-label="タグ">
+        </div>
+      </div>
+    </div>
+    <div class="bulk-2">
+    <div class="bulk-row">
+      <label class="bulk-ck"><input type="checkbox" name="use_scene" aria-label="場面を変更する"></label>
+      <label class="field"><span>場面</span><input name="scene" maxlength="30" autocomplete="off"></label>
+    </div>
+    <div class="bulk-row">
+      <label class="bulk-ck"><input type="checkbox" name="use_mood" aria-label="雰囲気を変更する"></label>
+      <label class="field"><span>雰囲気</span><input name="mood" maxlength="30" autocomplete="off"></label>
+    </div>
+    </div>
+    <div class="bulk-row">
+      <label class="bulk-ck"><input type="checkbox" name="use_description" aria-label="説明を変更する"></label>
+      <label class="field"><span>説明</span><textarea name="description" rows="2" maxlength="300"></textarea></label>
+    </div>
+
+    <h3 class="bulk-h">状態・付箋</h3>
+    <div class="bulk-sel">
+      <label class="field"><span>AI解析</span>
+        <select name="status">
+          <option value="">変更しない</option>
+          <option value="done">解析済みにする（AI解析の対象から外す）</option>
+          <option value="pending">未解析に戻す（AI解析の対象にする）</option>
+        </select></label>
+      <label class="field"><span>重複</span>
+        <select name="dup">
+          <option value="">変更しない</option>
+          <option value="mark">重複として外す</option>
+          <option value="restore">対象に戻す</option>
+        </select></label>
+      <label class="field"><span>付箋に入れる</span><select name="addTheme" id="bulk-add-theme"></select></label>
+      <label class="field"><span>付箋から外す</span><select name="removeTheme" id="bulk-remove-theme"></select></label>
+    </div>
+
     <div class="dlg-actions">
       <button type="button" class="btn" data-close>やめる</button>
       <button type="submit" class="btn primary">まとめて保存</button>
@@ -466,7 +519,7 @@
 <div id="busy" class="busy" hidden><div class="busy-card"><span class="spinner" aria-hidden="true"></span><p id="busy-msg"></p></div></div>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
-<script src="config.js?v=1.3.2"></script>
-<script src="app.js?v=1.3.2"></script>
+<script src="config.js?v=1.4.0"></script>
+<script src="app.js?v=1.4.0"></script>
 </body>
 </html>

@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — app.js  v1.3.2 */
+/* おもいで付箋ボード — app.js  v1.4.0 */
 (() => {
   'use strict';
 
@@ -1487,9 +1487,11 @@
   });
 
   /* ============================================================
-   * 撮影日時・場所の一括修正
+   * 写真の情報の一括修正
    * ============================================================ */
   let BULK = [];
+  const BULK_TEXT = ['takenAt', 'place', 'lat', 'lng', 'tags', 'scene', 'mood', 'description'];
+  const BULK_LABEL = { takenAt: '撮影日時', place: '撮影地', lat: '緯度', lng: '経度', tags: 'タグ', scene: '場面', mood: '雰囲気', description: '説明' };
   $('#sel-bulk').addEventListener('click', () => {
     const ids = [...LIB.selected];
     if (!ids.length) return toast('写真を選んでください。', 'warn');
@@ -1498,52 +1500,98 @@
     f.reset();
     resetMapsPaste(f);
     $('#bulk-count').textContent = `選んだ ${ids.length}枚の写真を修正します。`;
-    // 全員同じ値ならあらかじめ入れておく
+    // 全員同じ値の項目はあらかじめ入れておく
     const ps = ids.map(id => S.photoMap.get(id)).filter(Boolean);
-    const same = k => { const v = ps.map(p => (p[k] == null ? '' : String(p[k]))); return v.every(x => x === v[0]) ? v[0] : ''; };
+    const same = get => { const v = ps.map(get); return v.every(x => x === v[0]) ? v[0] : ''; };
     const dates = uniq(ps.map(p => String(p.takenAt || '').slice(0, 10)));
     f.elements.namedItem('takenAt').value = dates.length === 1 ? dates[0] : '';
-    f.elements.namedItem('place').value = same('place');
-    f.elements.namedItem('lat').value = same('lat');
-    f.elements.namedItem('lng').value = same('lng');
+    ['place', 'scene', 'mood', 'description'].forEach(k => { f.elements.namedItem(k).value = same(p => String(p[k] || '')); });
+    ['lat', 'lng'].forEach(k => { f.elements.namedItem(k).value = same(p => (p[k] == null ? '' : String(p[k]))); });
+    f.elements.namedItem('tags').value = same(p => (p.tags || []).join('、'));
+    const opts = S.themes.map(t => `<option value="${esc(t.themeId)}">${esc(t.title)}</option>`).join('');
+    $('#bulk-add-theme').innerHTML = '<option value="">入れない</option>' + opts;
+    $('#bulk-remove-theme').innerHTML = '<option value="">外さない</option>' +
+      S.themes.filter(t => t.photoIds.some(id => ids.includes(id))).map(t => `<option value="${esc(t.themeId)}">${esc(t.title)}</option>`).join('');
     $('#dlg-bulk').showModal();
   });
   // 入力したら自動で「変更する」にチェック
   $('#dlg-bulk form').addEventListener('input', e => {
-    const n = e.target.name;
-    if (['takenAt', 'place', 'lat', 'lng'].includes(n)) tickUse(e.currentTarget, n);
+    const n = e.target.name === 'tagMode' ? 'tags' : e.target.name;
+    if (BULK_TEXT.includes(n)) tickUse(e.currentTarget, n);
+  });
+  $('#dlg-bulk form').addEventListener('change', e => {
+    if (e.target.name === 'tagMode') tickUse(e.currentTarget, 'tags');
   });
   $('#dlg-bulk form').addEventListener('submit', async e => {
     e.preventDefault();
     const f = e.currentTarget;
+    const val = n => f.elements.namedItem(n).value;
     const fields = {};
-    for (const k of ['takenAt', 'place', 'lat', 'lng']) {
+    for (const k of BULK_TEXT) {
       if (!f.elements.namedItem('use_' + k).checked) continue;
-      const v = f.elements.namedItem(k).value.trim();
+      const v = val(k).trim();
       if (k === 'takenAt') {
         const d = normDate(v);
         if (d === null) return toast('撮影日時は 2024-08-15 または 2024-08-15 14:30 の形式で入力してください。', 'warn');
         fields.takenAt = d;
       } else if (k === 'lat' || k === 'lng') {
-        if (v !== '' && isNaN(Number(v))) return toast(`${k === 'lat' ? '緯度' : '経度'}は数字で入力してください。`, 'warn');
+        if (v !== '' && isNaN(Number(v))) return toast(`${BULK_LABEL[k]}は数字で入力してください。`, 'warn');
         fields[k] = v;
+      } else if (k === 'tags') {
+        fields.tags = splitList(v);
+        if (val('tagMode') !== 'replace' && !fields.tags.length) return toast('追加・削除するタグを入力してください。', 'warn');
       } else {
         fields[k] = v;
       }
     }
-    if (!Object.keys(fields).length) return toast('変更する項目にチェックを入れてください。', 'warn');
-    const label = { takenAt: '撮影日時', place: '撮影地', lat: '緯度', lng: '経度' };
-    if (!confirm(`${BULK.length}枚の「${Object.keys(fields).map(k => label[k]).join('・')}」を書き換えます。よろしいですか？`)) return;
+    const tagMode = val('tagMode');
+    const status = val('status'), dup = val('dup'), addT = val('addTheme'), remT = val('removeTheme');
+    if (status) fields.status = status;
+    if (addT && addT === remT) return toast('同じ付箋に「入れる」と「外す」は同時に選べません。', 'warn');
+    if (!Object.keys(fields).length && !dup && !addT && !remT) return toast('変更する項目を選んでください。', 'warn');
+
+    const tagWord = { replace: '置き換え', add: '追加', remove: '削除' }[tagMode];
+    const lines = Object.keys(fields).filter(k => k !== 'status').map(k => (k === 'tags' ? `タグ（${tagWord}）` : BULK_LABEL[k]));
+    if (status) lines.push(status === 'done' ? '解析済みにする' : '未解析に戻す');
+    if (dup) lines.push(dup === 'mark' ? '重複として外す' : '重複から対象に戻す');
+    if (addT) lines.push(`「${theme(addT).title}」に入れる`);
+    if (remT) lines.push(`「${theme(remT).title}」から外す`);
+    if (!confirm(`${BULK.length}枚の写真に次の変更をします。よろしいですか？\n・${lines.join('\n・')}`)) return;
+
     busy(`${BULK.length}枚の写真を修正しています…`);
     try {
-      const r = await api('bulkUpdatePhotos', { fileIds: BULK, fields });
-      mergePhotos(r.photos || []);
+      if (dup === 'restore') {
+        const ids = BULK.filter(id => (S.photoMap.get(id) || {}).status === 'dup');
+        if (ids.length) { const r = await api('restoreDuplicates', { fileIds: ids }); mergePhotos(r.photos || []); }
+      }
+      if (Object.keys(fields).length) {
+        const r = await api('bulkUpdatePhotos', { fileIds: BULK, fields, tagMode });
+        mergePhotos(r.photos || []);
+      }
+      if (remT) {
+        const ids = BULK.filter(id => theme(remT).photoIds.includes(id));
+        if (ids.length) { const r = await api('assignPhotos', { themeId: remT, fileIds: ids, mode: 'remove' }); upsertTheme(r.theme); }
+      }
+      if (addT && dup !== 'mark') {
+        const ids = BULK.filter(isActive);
+        if (ids.length) { const r = await api('assignPhotos', { themeId: addT, fileIds: ids, mode: 'add' }); upsertTheme(r.theme); }
+      }
+      if (dup === 'mark') {
+        const ids = BULK.filter(isActive);
+        if (ids.length) {
+          const r = await api('markDuplicates', { items: ids.map(id => ({ fileId: id, dupOf: '' })) });
+          mergePhotos(r.photos || []);
+          (r.themes || []).forEach(upsertTheme);
+        }
+      }
       $('#dlg-bulk').close();
       setSelecting(false);
-      toast(`${(r.photos || []).length}枚の写真を修正しました。`);
-    } catch (err) { toast(err.message, 'error'); } finally { busy(false); }
+      toast(`${BULK.length}枚の写真を修正しました。`);
+    } catch (err) {
+      toast(err.message, 'error');
+      renderPhotoGrid();
+    } finally { busy(false); }
   });
-
 
   /* ============================================================
    * 重複している写真

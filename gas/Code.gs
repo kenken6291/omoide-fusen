@@ -1,6 +1,6 @@
 /**
  * おもいで付箋ボード (omoide-fusen) — Google Apps Script バックエンド
- * Version 1.3.0
+ * Version 1.4.0
  *
  * ── スクリプトプロパティ ──────────────────────────────
  *   GEMINI_API_KEY          (必須) Google AI Studio の API キー
@@ -26,7 +26,7 @@
  *   ※ コードを変更したら「デプロイを管理 > 編集 > 新バージョン」で再デプロイ
  */
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 
 const DEF = {
   users:    { name: 'Users',    cols: ['email', 'nickname', 'passwordHash', 'salt', 'isFirstLogin', 'failCount', 'lockedUntil', 'folderId', 'homeFolderId', 'createdAt', 'lastLoginAt'] },
@@ -41,8 +41,8 @@ const SESSION_DAYS = 30;
 const MAX_FAIL = 5;
 const LOCK_MINUTES = 15;
 const MAX_NARRATION_PHOTOS = 24;
-const SCAN_DEPTH = 4;          // 指定フォルダから何階層下まで読むか
-const SCAN_MAX_FILES = 3000;   // 1回の読み込みで扱う画像の上限
+const SCAN_DEPTH = 2;          // 指定フォルダから何階層下まで読むか
+const SCAN_MAX_FILES = 4000;   // 1回の読み込みで扱う画像の上限
 
 /** 閲覧のみ許可された会員が使える操作 */
 const READONLY_ACTIONS = ['bootstrap', 'getImages', 'listComments', 'tts', 'listThemes', 'listPhotos', 'getImage'];
@@ -619,122 +619,34 @@ function updatePhoto_(req, u) {
 }
 
 /**
- * 選んだ複数の写真の 撮影日時・撮影地・緯度・経度 をまとめて書き換える
- * 撮影日時に日付だけを渡した場合は、各写真の時刻を残して日付だけ変える
+ * 選んだ複数の写真の情報をまとめて書き換える
+ *  - 撮影日時：日付だけを渡すと各写真の時刻を残して日付だけ変える
+ *  - タグ：tagMode = replace（置き換え）/ add（追加）/ remove（削除）
+ *  - 状態：done（解析済みにする）/ pending（未解析に戻す）※重複で外した写真は変えない
  */
-/**
- * 重複している写真を探す（MD5が同じ、MD5がなければ ファイル名＋サイズが同じ）
- * 残す1枚は「付箋に入っている」「解析済み」「先に登録した」ものを優先
- */
-function findDuplicates_(req, u) {
-  let mine = rows_(DEF.photos).filter(r => r.email === u.email);
-  const missing = mine.filter(r => !r.md5 || !r.fileSize).map(r => r.fileId);
-  if (missing.length) {
-    const metas = driveMetaMany_(missing, 'id,md5Checksum,size');
-    withLock_(() => {
-      const ups = [];
-      rows_(DEF.photos).forEach(r => {
-        const m = r.email === u.email && metas[r.fileId];
-        if (m) ups.push({ row: r._row, obj: { md5: m.md5Checksum || '', fileSize: Number(m.size) || '' } });
-      });
-      patchMany_(DEF.photos, ups);
-    });
-    mine = rows_(DEF.photos).filter(r => r.email === u.email);
-  }
-  const inTheme = {};
-  rows_(DEF.themes).filter(t => t.email === u.email).forEach(t => parseArr_(t.photoIds).forEach(id => { inTheme[id] = (inTheme[id] || 0) + 1; }));
-  const groups = {};
-  mine.forEach(r => {
-    const k = dupKey_(r);
-    if (k) (groups[k] = groups[k] || []).push(r);
-  });
-  const score = r => (r.status !== 'dup' ? 1000 : 0) + (inTheme[r.fileId] ? 100 : 0) + (r.status === 'done' ? 10 : 0);
-  const out = Object.keys(groups).map(k => groups[k]).filter(g => g.length > 1).map(g => {
-    g.sort((a, b) => score(b) - score(a) || String(a.addedAt).localeCompare(String(b.addedAt)));
-    return { fileIds: g.map(r => r.fileId), exact: g[0].md5 ? true : false };
-  });
-  return { groups: out, photos: mine.map(photoPub_) };
-}
-
-/** 重複として対象から外す（付箋に入っていたら残す写真に置き換える） */
-function markDuplicates_(req, u) {
-  const own = ownSet_(u.email);
-  const items = (Array.isArray(req.items) ? req.items : []).filter(x => x && own[x.fileId] && x.fileId !== x.dupOf).slice(0, 3000);
-  if (!items.length) throw err_('外す写真を選んでください。');
-  const dupOf = {};
-  items.forEach(x => { dupOf[x.fileId] = own[x.dupOf] ? String(x.dupOf) : ''; });
-  const photos = [], themes = [];
-  withLock_(() => {
-    const pu = [];
-    rows_(DEF.photos).forEach(r => {
-      if (r.email !== u.email || dupOf[r.fileId] === undefined) return;
-      const obj = { status: 'dup', dupOf: dupOf[r.fileId] };
-      pu.push({ row: r._row, obj });
-      photos.push(photoPub_(Object.assign({}, r, obj)));
-    });
-    patchMany_(DEF.photos, pu);
-    const tu = [];
-    rows_(DEF.themes).forEach(t => {
-      if (t.email !== u.email) return;
-      const ids = parseArr_(t.photoIds);
-      if (!ids.some(id => dupOf[id] !== undefined)) return;
-      const next = [];
-      ids.forEach(id => {
-        const v = dupOf[id] !== undefined ? dupOf[id] : id;
-        if (v && dupOf[v] === undefined && next.indexOf(v) < 0) next.push(v);
-      });
-      let cover = t.coverFileId;
-      if (dupOf[cover] !== undefined) cover = dupOf[cover];
-      if (next.indexOf(cover) < 0) cover = next[0] || '';
-      const obj = { photoIds: JSON.stringify(next), coverFileId: cover, narration: '', updatedAt: now_() };
-      tu.push({ row: t._row, obj });
-      themes.push(themePub_(Object.assign({}, t, obj)));
-    });
-    patchMany_(DEF.themes, tu);
-  });
-  return { photos, themes };
-}
-
-/** 重複として外した写真を対象に戻す */
-function restoreDuplicates_(req, u) {
-  const want = {};
-  (Array.isArray(req.fileIds) ? req.fileIds : []).forEach(id => { want[id] = true; });
-  const photos = [];
-  withLock_(() => {
-    const pu = [];
-    rows_(DEF.photos).forEach(r => {
-      if (r.email !== u.email || !want[r.fileId] || r.status !== 'dup') return;
-      const analyzed = !!(r.description || parseArr_(r.tags).length);
-      const obj = { status: analyzed ? 'done' : 'pending', dupOf: '' };
-      pu.push({ row: r._row, obj });
-      photos.push(photoPub_(Object.assign({}, r, obj)));
-    });
-    patchMany_(DEF.photos, pu);
-  });
-  return { photos };
-}
-
-function dupSet_(email) {
-  const set = {};
-  rows_(DEF.photos).forEach(r => { if (r.email === email && r.status === 'dup') set[r.fileId] = true; });
-  return set;
-}
-
 function bulkUpdatePhotos_(req, u) {
   const own = ownSet_(u.email);
-  const ids = unique_((Array.isArray(req.fileIds) ? req.fileIds : []).map(String).filter(id => own[id])).slice(0, 3000);
+  const ids = unique_((Array.isArray(req.fileIds) ? req.fileIds : []).map(String).filter(id => own[id])).slice(0, SCAN_MAX_FILES);
   if (!ids.length) throw err_('写真を選んでください。');
   const f = req.fields || {};
   const base = {};
-  ['place', 'lat', 'lng'].forEach(k => { if (f[k] !== undefined) base[k] = f[k]; });
+  ['place', 'lat', 'lng', 'scene', 'mood', 'description'].forEach(k => { if (f[k] !== undefined) base[k] = f[k]; });
   let dateOnly = '';
   if (f.takenAt !== undefined) {
     const t = normDate_(f.takenAt);
     if (t === null) throw err_('撮影日時は 2024-08-15 または 2024-08-15 14:30 の形式で入力してください。');
     if (t.length === 10) dateOnly = t; else base.takenAt = t;
   }
+  const tagMode = ['add', 'remove'].indexOf(req.tagMode) >= 0 ? req.tagMode : 'replace';
+  let tagList = null;
+  if (f.tags !== undefined) {
+    tagList = unique_((Array.isArray(f.tags) ? f.tags : String(f.tags || '').split(/[、,，\n]+/)).map(x => String(x).trim()).filter(Boolean));
+    if (tagMode === 'replace') base.tags = tagList;
+    else if (!tagList.length) throw err_('追加・削除するタグを入力してください。');
+  }
+  const statusTo = ['done', 'pending'].indexOf(f.status) >= 0 ? f.status : '';
   const clean = photoFields_(base);
-  if (!Object.keys(clean).length && !dateOnly) throw err_('変更する項目にチェックを入れてください。');
+  if (!Object.keys(clean).length && !dateOnly && !tagList && !statusTo) throw err_('変更する項目にチェックを入れてください。');
   const photos = [];
   withLock_(() => {
     const map = {};
@@ -748,6 +660,12 @@ function bulkUpdatePhotos_(req, u) {
         const old = String(r.takenAt || '');
         obj.takenAt = dateOnly + (old.length >= 16 ? old.slice(10, 16) : '');
       }
+      if (tagList && tagMode !== 'replace') {
+        const cur = parseArr_(r.tags);
+        const next = tagMode === 'add' ? unique_(cur.concat(tagList)) : cur.filter(t => tagList.indexOf(t) < 0);
+        obj.tags = JSON.stringify(next.slice(0, 20));
+      }
+      if (statusTo && r.status !== 'dup') obj.status = statusTo;
       ups.push({ row: r._row, obj });
       photos.push(photoPub_(Object.assign({}, r, obj)));
     });
@@ -1502,7 +1420,7 @@ function aiComment_(req, u) {
  * ================================================================ */
 function importData_(req, u) {
   const own = ownSet_(u.email);
-  const P = Array.isArray(req.photos) ? req.photos.slice(0, 5000) : [];
+  const P = Array.isArray(req.photos) ? req.photos.slice(0, Math.max(5000, SCAN_MAX_FILES)) : [];
   const T = Array.isArray(req.themes) ? req.themes.slice(0, 1000) : [];
   const C = Array.isArray(req.comments) ? req.comments.slice(0, 5000) : [];
 

@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — style.css  v1.3.2 */
+/* おもいで付箋ボード — style.css  v1.4.0 */
 
 :root {
   --board: #E9EDF1;
@@ -544,3 +544,13 @@ body.readonly .note { cursor: pointer; }
 /* v1.3.2：写真の情報画面の「重複として外す」 */
 .dup-row { color: #8A5A00; margin-top: -6px; }
 .check-row input:disabled + * , .check-row:has(input:disabled) { opacity: .5; }
+
+/* v1.4.0：一括修正（全項目） */
+.bulk-h { font-size: .9rem; margin: 14px 0 8px; padding-top: 10px; border-top: 1px solid #E3E7EC; }
+.bulk-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+.bulk-2 .bulk-row { min-width: 0; }
+.bulk-row .row select { width: auto; flex: none; }
+.bulk-row .row input { flex: 1; min-width: 0; }
+.bulk-row textarea { resize: vertical; }
+.bulk-sel { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+@media (max-width: 560px) { .bulk-2, .bulk-sel { grid-template-columns: 1fr; } #dlg-bulk .maps-paste { margin-left: 0; } }
