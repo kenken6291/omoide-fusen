@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — app.js  v1.7.3 */
+/* おもいで付箋ボード — app.js  v1.7.4 */
 (() => {
   'use strict';
 
@@ -227,6 +227,7 @@
       throw new Error(res.error || 'エラーが発生しました。');
     }
     if (res.usage) S.usage = res.usage;
+    checkServerVersion(res.version);
     return res;
   }
 
@@ -402,14 +403,17 @@
     busy(S.viewing ? `${S.viewing.nickname || S.viewing.email} さんのボードを読み込んでいます…` : 'ボードを読み込んでいます…');
     try {
       const r = await api('bootstrap');
+      if (!Array.isArray(r.photos) || !Array.isArray(r.themes)) {
+        throw new Error(`サーバーからの応答に写真・付箋の一覧がありません（サーバー v${r.version || '不明'}／画面 v${VERSION}）。GASの Code.gs を最新のものに差し替えて「新バージョン」で再デプロイしてください。`);
+      }
       if (!S.viewing) {
         S.user = Object.assign({}, S.user, r.user); saveUser();
         S.folder = r.folder;
         S.shares = r.shares || S.shares;
         renderBoardSwitch();
       }
-      S.themes = r.themes;
-      setPhotos(r.photos);
+      S.themes = r.themes.map(normTheme);
+      setPhotos(r.photos.map(normPhoto));
       renderBoard();
       if (!localStorage.getItem(viewKey()) && S.themes.length) fitView();
     } catch (e) {
@@ -441,13 +445,38 @@
     await loadBoard();
   }
 
+  /* サーバーからのデータが欠けていても画面が止まらないように整える */
+  function normTheme(t) {
+    return Object.assign({ title: '', color: COLORS[0].v, x: 0, y: 0, coverFileId: '', earthVideoUrl: '' }, t || {}, {
+      photoIds: Array.isArray(t && t.photoIds) ? t.photoIds : [],
+      excludedIds: Array.isArray(t && t.excludedIds) ? t.excludedIds : [],
+    });
+  }
+  function normPhoto(p) {
+    return Object.assign({ status: 'pending', fileName: '', place: '', description: '' }, p || {}, {
+      tags: Array.isArray(p && p.tags) ? p.tags : [],
+    });
+  }
+  /* 画面とGASのバージョンが合っていないときに一度だけ知らせる */
+  const MIN_SERVER = '1.7.0';
+  let versionWarned = false;
+  function cmpVer(a, b) {
+    const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number);
+    for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0); }
+    return 0;
+  }
+  function checkServerVersion(v) {
+    if (!v || versionWarned || cmpVer(v, MIN_SERVER) >= 0) return;
+    versionWarned = true;
+    setTimeout(() => toast(`GASのバージョンが古いままです（サーバー v${v}、必要 v${MIN_SERVER} 以上）。Code.gs を差し替えて「新バージョン」で再デプロイしてください。`, 'error'), 800);
+  }
   function setPhotos(list) {
     S.photos = list;
     S.photoMap = new Map(list.map(p => [p.fileId, p]));
     updatePhotoCount();
   }
   function mergePhotos(list) {
-    list.forEach(p => {
+    list.map(normPhoto).forEach(p => {
       const i = S.photos.findIndex(x => x.fileId === p.fileId);
       if (i >= 0) S.photos[i] = p; else S.photos.push(p);
       S.photoMap.set(p.fileId, p);
@@ -512,6 +541,7 @@
     $('#board-empty').hidden = S.themes.length > 0;
   }
   function upsertTheme(t) {
+    t = normTheme(t);
     const i = S.themes.findIndex(x => x.themeId === t.themeId);
     if (i >= 0) S.themes[i] = t; else S.themes.push(t);
     replaceNote(t);
