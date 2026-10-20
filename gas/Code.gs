@@ -1,6 +1,6 @@
 /**
  * おもいで付箋ボード (omoide-fusen) — Google Apps Script バックエンド
- * Version 1.7.0
+ * Version 1.7.1
  *
  * ── スクリプトプロパティ ──────────────────────────────
  *   GEMINI_API_KEY          (必須) Google AI Studio の API キー
@@ -26,7 +26,7 @@
  *   ※ コードを変更したら「デプロイを管理 > 編集 > 新バージョン」で再デプロイ
  */
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.7.1';
 
 const DEF = {
   users:    { name: 'Users',    cols: ['email', 'nickname', 'passwordHash', 'salt', 'isFirstLogin', 'failCount', 'lockedUntil', 'folderId', 'homeFolderId', 'createdAt', 'lastLoginAt'] },
@@ -138,6 +138,7 @@ const PUBLIC_ACTIONS = {
 const PRIVATE_ACTIONS = {
   me: me_,
   bootstrap: bootstrap_,
+  diag: diag_,
   logout: logout_,
   changePassword: changePassword_,
   usage: (req, u) => ({ usage: usagePub_(u.email) }),
@@ -333,6 +334,22 @@ function bootstrap_(req, u, ctx) {
     shares: listShares_(req, u),
     usage: usagePub_(u.email),
   };
+}
+
+/** 起動データの診断（設定画面の「接続を確かめる」から呼ぶ） */
+function diag_(req, u, ctx) {
+  const out = { email: u.email, sheets: ss_().getSheets().map(s => s.getName()) };
+  ['photos', 'themes', 'comments', 'shares'].forEach(k => {
+    try {
+      const all = rows_(DEF[k]);
+      out[k] = { rows: all.length, mine: all.filter(r => (r.email || r.ownerEmail) === u.email).length, cols: sh_(DEF[k]).getLastColumn() };
+    } catch (e) { out[k] = { error: e.message }; }
+  });
+  try {
+    const b = bootstrap_(req, u, ctx);
+    out.bootstrap = { keys: Object.keys(b), photos: Array.isArray(b.photos) ? b.photos.length : typeof b.photos, themes: Array.isArray(b.themes) ? b.themes.length : typeof b.themes, bytes: JSON.stringify(b).length };
+  } catch (e) { out.bootstrap = { error: e.message, stack: String(e.stack || '').split('\n').slice(0, 3).join(' / ') }; }
+  return { diag: out };
 }
 
 /* ================================================================

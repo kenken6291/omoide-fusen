@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — app.js  v1.7.4 */
+/* おもいで付箋ボード — app.js  v1.7.5 */
 (() => {
   'use strict';
 
@@ -404,7 +404,14 @@
     try {
       const r = await api('bootstrap');
       if (!Array.isArray(r.photos) || !Array.isArray(r.themes)) {
-        throw new Error(`サーバーからの応答に写真・付箋の一覧がありません（サーバー v${r.version || '不明'}／画面 v${VERSION}）。GASの Code.gs を最新のものに差し替えて「新バージョン」で再デプロイしてください。`);
+        // 起動データが欠けていたら、写真・付箋を個別に取り直す（どこで欠けたかは「接続を確かめる」で確認できる）
+        console.warn('bootstrap の応答に photos/themes がありません', Object.keys(r));
+        const [th, ph] = await Promise.all([api('listThemes'), api('listPhotos')]);
+        r.themes = th.themes; r.photos = ph.photos;
+        if (!Array.isArray(r.photos) || !Array.isArray(r.themes)) {
+          throw new Error(`サーバーから写真・付箋の一覧を受け取れませんでした（サーバー v${r.version || '不明'}／画面 v${VERSION}、応答の項目：${Object.keys(r).join(',')}）。設定の「接続を確かめる」の結果を確認してください。`);
+        }
+        toast('起動データの一部が欠けていたため、別の方法で読み込みました。設定の「接続を確かめる」で詳しく確認できます。', 'warn');
       }
       if (!S.viewing) {
         S.user = Object.assign({}, S.user, r.user); saveUser();
@@ -1045,7 +1052,22 @@
     } catch (_) {
       lines.push(getOk ? '② 送信（doPost）：つながりません。Code.gs を保存後に「新バージョン」で再デプロイしたか確認してください。' : '② 送信（doPost）：つながりません。');
     }
-    const ok = lines.some(l => l.startsWith('② 送信（doPost）：OK'));
+    // ③ ログイン中なら、起動データ（写真・付箋）を正しく作れるかサーバー側で確認
+    if (S.token && lines.some(l => l.startsWith('② 送信（doPost）：OK'))) {
+      try {
+        const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ action: 'diag', token: S.token }) });
+        const j = JSON.parse(await r.text());
+        if (!j.ok) lines.push(`③ 起動データ：エラー「${j.error}」`);
+        else {
+          const g = j.diag || {};
+          const b = g.bootstrap || {};
+          lines.push(`③ シート：${(g.sheets || []).join('・')}`);
+          lines.push(`　 写真 ${g.photos ? (g.photos.error || `全${g.photos.rows}行（自分 ${g.photos.mine}行）`) : '?'}／付箋 ${g.themes ? (g.themes.error || `全${g.themes.rows}行（自分 ${g.themes.mine}行）`) : '?'}`);
+          lines.push(b.error ? `　 起動データの作成でエラー：${b.error}（${b.stack || ''}）` : `　 起動データ：写真 ${b.photos} 件・付箋 ${b.themes} 件（${Math.round((b.bytes || 0) / 1024)}KB）`);
+        }
+      } catch (_) { lines.push('③ 起動データ：確認できませんでした（GASが v1.7.1 より前の可能性）'); }
+    }
+    const ok = lines.some(l => l.startsWith('② 送信（doPost）：OK')) && !lines.some(l => /起動データ.*エラー/.test(l));
     if (!ok) lines.push('→ ブラウザの新しいタブで上の接続先URLを直接開くと、GAS側のエラー内容が表示されます。');
     show(ok ? 'ok' : 'ng');
   });
