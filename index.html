@@ -13,7 +13,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%93%8C%3C/text%3E%3C/svg%3E">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-<link rel="stylesheet" href="style.css?v=1.7.5">
+<link rel="stylesheet" href="style.css?v=1.8.0">
 </head>
 <body>
 
@@ -107,6 +107,7 @@
       <button class="btn primary edit-only" id="btn-new">テーマを作る</button>
       <button class="btn edit-only" id="btn-suggest"><span class="lg">AIにテーマを提案してもらう</span><span class="sm">AI提案</span></button>
       <button class="btn edit-only" id="btn-photos">写真 <span class="pill" id="photo-count">0</span></button>
+      <button class="btn edit-only" id="btn-publish"><span class="lg">公開の管理</span><span class="sm">公開</span> <span class="pill" id="publish-count" hidden>0</span></button>
       <button class="icon-btn" id="btn-settings" aria-label="設定" data-open-settings>
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
       </button>
@@ -215,6 +216,7 @@
   <button role="menuitem" data-act="open">開く</button>
   <button role="menuitem" data-act="organize">写真を整理する（外す・表紙）</button>
   <button role="menuitem" data-act="edit">名前と色を変える</button>
+  <button role="menuitem" data-act="share">公開する相手を選ぶ</button>
   <button role="menuitem" data-act="refresh">写真を探し直す</button>
   <button role="menuitem" data-act="narration">ナレーションを作り直す</button>
   <button role="menuitem" data-act="earth">撮影地と映像</button>
@@ -516,14 +518,10 @@
         <h3>今日のAI利用</h3>
         <p id="usage-text" class="muted"></p>
       </section>
-      <section class="set-sec">
-        <h3>ボードの閲覧を許可する会員</h3>
-        <p class="muted small">許可した会員は、あなたのボードを見ることだけできます（編集・コメントはできません）。</p>
-        <ul id="share-list" class="share-list"></ul>
-        <div class="row">
-          <input type="email" id="share-email" placeholder="会員のメールアドレス" aria-label="閲覧を許可するメールアドレス">
-          <button type="button" class="btn small" id="share-add">許可する</button>
-        </div>
+      <section class="set-sec edit-only">
+        <h3>付箋の公開</h3>
+        <p class="muted small" id="share-summary">家族や友人など、指定した会員にだけ付箋を公開できます（閲覧のみ）。</p>
+        <button type="button" class="btn small" id="btn-open-publish">公開の管理を開く</button>
       </section>
       <section class="set-sec account">
         <p><strong id="acc-name"></strong><br><span class="muted" id="acc-email"></span></p>
@@ -538,6 +536,70 @@
     <div class="dlg-actions">
       <button type="button" class="btn" data-close>閉じる</button>
       <button type="submit" class="btn primary">設定を保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-publish" class="dlg wide">
+  <form>
+    <h2>公開の管理</h2>
+    <p class="muted small">付箋は、ここで指定した会員にだけ公開されます（閲覧のみ。編集・コメント・写真ライブラリは見られません）。「停止中」にすると、設定を残したまま相手から見えなくなります。</p>
+
+    <details class="pub-add" id="pub-add">
+      <summary>＋ 公開する相手を追加する</summary>
+      <div class="pub-add-grid">
+        <label class="field"><span>会員のメールアドレス</span>
+          <input type="email" name="email" placeholder="例：hanako@example.com" autocomplete="off"></label>
+        <label class="field"><span>グループ</span>
+          <select name="group"><option value="家族">家族</option><option value="友人">友人</option><option value="その他">その他</option></select></label>
+        <label class="field"><span>公開する付箋</span>
+          <select name="scope"><option value="select">選んだ付箋だけ</option><option value="all">すべての付箋</option></select></label>
+      </div>
+      <label class="check-row"><input type="checkbox" name="notify" checked> 相手にお知らせメールを送る</label>
+      <div class="row"><button type="button" class="btn small primary" id="pub-add-btn">追加する</button>
+        <span class="muted small">未登録の方は、このメールアドレスで会員登録すると見られるようになります。</span></div>
+    </details>
+
+    <div class="pub-bar">
+      <div class="pub-tabs" role="tablist" aria-label="表示の切り替え">
+        <button type="button" role="tab" data-tab="people" aria-selected="true">相手ごと</button>
+        <button type="button" role="tab" data-tab="table" aria-selected="false">付箋ごとの一覧表</button>
+      </div>
+      <div class="pub-filter" role="group" aria-label="グループで絞り込む">
+        <button type="button" data-g="" aria-pressed="true">すべて</button>
+        <button type="button" data-g="家族" aria-pressed="false">家族</button>
+        <button type="button" data-g="友人" aria-pressed="false">友人</button>
+        <button type="button" data-g="その他" aria-pressed="false">その他</button>
+      </div>
+    </div>
+    <div id="pub-body" class="pub-body"></div>
+
+    <div class="dlg-actions">
+      <span class="muted small pub-dirty" id="pub-dirty"></span>
+      <span class="spacer"></span>
+      <button type="button" class="btn" id="pub-close">閉じる</button>
+      <button type="submit" class="btn primary" id="pub-save" disabled>変更を保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-theme-share" class="dlg">
+  <form>
+    <h2>公開する相手を選ぶ</h2>
+    <p class="muted small" id="ts-title"></p>
+    <div class="chips" id="ts-quick">
+      <button type="button" data-pick="家族">家族全員</button>
+      <button type="button" data-pick="友人">友人全員</button>
+      <button type="button" data-pick="*">全員</button>
+      <button type="button" data-pick="">だれにも公開しない</button>
+    </div>
+    <ul id="ts-list" class="ts-list"></ul>
+    <p class="muted small">停止中の相手は、チェックを入れても再開するまで見えません。「すべての付箋」の相手は、公開の管理で変更できます。</p>
+    <div class="dlg-actions">
+      <button type="button" class="link" id="ts-manage">公開の管理を開く</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn" data-close>やめる</button>
+      <button type="submit" class="btn primary">保存する</button>
     </div>
   </form>
 </dialog>
@@ -564,7 +626,7 @@
 <div id="busy" class="busy" hidden><div class="busy-card"><span class="spinner" aria-hidden="true"></span><p id="busy-msg"></p></div></div>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
-<script src="config.js?v=1.7.5"></script>
-<script src="app.js?v=1.7.5"></script>
+<script src="config.js?v=1.8.0"></script>
+<script src="app.js?v=1.8.0"></script>
 </body>
 </html>

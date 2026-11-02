@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — app.js  v1.7.5 */
+/* おもいで付箋ボード — app.js  v1.8.0 */
 (() => {
   'use strict';
 
@@ -289,6 +289,7 @@
   function saveUser() { localStorage.setItem(KEY.user, JSON.stringify(S.user)); }
   function clearSession() {
     S.token = ''; S.user = null; S.viewing = null; S.readOnly = false;
+    S.shares = { granted: [], sharedWithMe: [] };
     document.body.classList.remove('readonly');
     localStorage.removeItem(KEY.token); localStorage.removeItem(KEY.user);
     imgCache.clear();
@@ -418,6 +419,7 @@
         S.folder = r.folder;
         S.shares = r.shares || S.shares;
         renderBoardSwitch();
+        renderPublishCount();
       }
       S.themes = r.themes.map(normTheme);
       setPhotos(r.photos.map(normPhoto));
@@ -435,7 +437,7 @@
     const list = S.shares.sharedWithMe || [];
     $('#board-switch-wrap').hidden = !list.length;
     $('#board-switch').innerHTML = '<option value="">自分のボード</option>' +
-      list.map(o => `<option value="${esc(o.email)}">${esc(o.nickname || o.email)} さんのボード（閲覧のみ）</option>`).join('');
+      list.map(o => `<option value="${esc(o.email)}">${esc(o.nickname || o.email)} さんのボード（公開 ${o.count || 0}件・閲覧のみ）</option>`).join('');
     $('#board-switch').value = S.viewing ? S.viewing.email : '';
   }
   $('#board-switch').addEventListener('change', e => switchBoard(e.target.value));
@@ -447,7 +449,7 @@
     document.body.classList.toggle('readonly', S.readOnly);
     const banner = $('#readonly-banner');
     banner.hidden = !S.readOnly;
-    if (S.readOnly) banner.textContent = `${S.viewing.nickname || S.viewing.email} さんのボードを見ています（閲覧のみ）`;
+    if (S.readOnly) banner.textContent = `${S.viewing.nickname || S.viewing.email} さんがあなたに公開した付箋を見ています（閲覧のみ）`;
     $('#board-switch').value = S.viewing ? S.viewing.email : '';
     await loadBoard();
   }
@@ -465,7 +467,7 @@
     });
   }
   /* 画面とGASのバージョンが合っていないときに一度だけ知らせる */
-  const MIN_SERVER = '1.7.0';
+  const MIN_SERVER = '1.8.0';
   let versionWarned = false;
   function cmpVer(a, b) {
     const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number);
@@ -527,6 +529,17 @@
       <h3 class="note-title">${esc(t.title)}</h3>
       <span class="note-count">${count}枚</span>
       <button class="note-menu-btn" aria-label="${esc(t.title)}のメニュー">⋯</button>`;
+    if (!S.readOnly) {
+      const to = sharedTo(t);
+      if (to.length) {
+        const b = document.createElement('span');
+        b.className = 'note-share';
+        b.textContent = `公開 ${to.length}人`;
+        b.title = '公開中：' + to.map(x => x.nickname || x.email).join('、');
+        el.appendChild(b);
+        el.setAttribute('aria-label', `${t.title}（${count}枚・${to.length}人に公開中）`);
+      }
+    }
     const cover = S.photoMap.has(t.coverFileId) ? t.coverFileId : t.photoIds.find(id => S.photoMap.has(id));
     const box = el.querySelector('.note-photo');
     if (cover) {
@@ -718,6 +731,7 @@
     if (act === 'open') return openViewer(t);
     if (act === 'organize') return openOrganize(t);
     if (act === 'edit') return openEdit(t);
+    if (act === 'share') return openThemeShare(t);
     if (act === 'earth') return openEarth(t);
     if (act === 'delete') {
       if (!confirm(`「${t.title}」の付箋をはがしますか？（写真そのものは消えません）`)) return;
@@ -991,10 +1005,11 @@
   }
   function renderShares() {
     const list = S.shares.granted || [];
-    $('#share-list').innerHTML = list.length ? list.map(s => `
-      <li><span>${esc(s.nickname || '（未登録）')}　<span class="muted small">${esc(s.email)}</span></span>
-      <button type="button" class="link danger" data-unshare="${esc(s.email)}">やめる</button></li>`).join('')
-      : '<li class="empty">まだ誰にも許可していません。</li>';
+    const on = list.filter(s => s.enabled).length;
+    $('#share-summary').textContent = list.length
+      ? `公開する相手 ${list.length}人（公開中 ${on}人・停止中 ${list.length - on}人）。家族や友人など、指定した会員にだけ付箋を公開できます。`
+      : '家族や友人など、指定した会員にだけ付箋を公開できます（閲覧のみ）。';
+    renderPublishCount();
   }
   async function openSettings() {
     const d = $('#dlg-settings');
@@ -1013,7 +1028,7 @@
     d.showModal();
     if (member) {
       api('usage').then(r => { S.usage = r.usage; renderUsage(); }).catch(() => {});
-      api('listShares').then(r => { S.shares = r; renderShares(); renderBoardSwitch(); }).catch(() => {});
+      api('listShares').then(r => { S.shares = r; renderShares(); renderBoardSwitch(); if (!S.readOnly) renderBoard(); }).catch(() => {});
     }
   }
   $('#dlg-settings form').addEventListener('submit', e => {
@@ -1080,24 +1095,300 @@
     imgCache.clear();
     toast('画像キャッシュを消しました。');
   });
-  $('#share-add').addEventListener('click', async () => {
-    const email = $('#share-email').value.trim();
-    if (!email) return toast('メールアドレスを入力してください。', 'warn');
-    try {
-      const r = await api('addShare', { email });
-      S.shares = r.shares;
-      renderShares();
-      $('#share-email').value = '';
-      toast(r.registered ? '閲覧を許可し、お知らせメールを送りました。' : 'まだ未登録の方です。このメールアドレスで登録すると見られるようになります（お知らせメールを送りました）。');
-    } catch (err) { toast(err.message, 'error'); }
+  $('#btn-open-publish').addEventListener('click', () => { $('#dlg-settings').close(); openPublish(); });
+
+  /* ============================================================
+   * 公開の管理（指定した会員にだけ付箋を公開する）
+   * ============================================================ */
+  const GROUPS = ['家族', '友人', 'その他'];
+  const PUB = { list: [], orig: new Map(), tab: 'people', g: '', open: new Set(), saving: false };
+  const pubKey = s => JSON.stringify([!!s.enabled, !!s.allThemes, s.group, [...(s.themeIds || [])].sort()]);
+  const cloneShare = s => Object.assign({}, s, { themeIds: [...(s.themeIds || [])] });
+  /** この付箋が見えている相手（公開中のみ） */
+  function sharedTo(t) {
+    return (S.shares.granted || []).filter(s => s.enabled && (s.allThemes || (s.themeIds || []).includes(t.themeId)));
+  }
+  function renderPublishCount() {
+    const n = (S.shares.granted || []).filter(s => s.enabled).length;
+    const pill = $('#publish-count');
+    pill.hidden = !n;
+    pill.textContent = n;
+  }
+  const pubDirty = () => PUB.list.filter(s => PUB.orig.has(s.email) && PUB.orig.get(s.email) !== pubKey(s));
+  const pubFind = email => PUB.list.find(s => s.email === email);
+  const pubName = s => s.nickname || s.email;
+  function pubReset() {
+    PUB.list = (S.shares.granted || []).map(cloneShare);
+    PUB.orig = new Map(PUB.list.map(s => [s.email, pubKey(s)]));
+  }
+  /** サーバーから受け取った一覧に、まだ保存していない手元の変更を残したまま入れ替える */
+  function pubMerge(granted) {
+    const local = new Map(PUB.list.map(s => [s.email, s]));
+    PUB.list = granted.map(g => local.get(g.email) && pubDirty().includes(local.get(g.email)) ? local.get(g.email) : cloneShare(g));
+    PUB.orig = new Map(granted.map(g => [g.email, pubKey(g)]));
+  }
+  function pubMsg(text, type = '') {
+    const el = $('#pub-dirty');
+    const n = pubDirty().length;
+    el.dataset.type = type;
+    el.textContent = text || (n ? `未保存の変更：${n}人分` : '');
+    $('#pub-save').disabled = !n || PUB.saving;
+  }
+
+  function openPublish() {
+    if (S.readOnly) return toast('公開の管理は、自分のボードに戻ってから行ってください。', 'warn');
+    pubReset();
+    PUB.open.clear();
+    const d = $('#dlg-publish');
+    $('#pub-add').open = !PUB.list.length;
+    renderPublish();
+    pubMsg();
+    if (!d.open) d.showModal();
+    api('listShares').then(r => {
+      S.shares = r;
+      pubMerge(r.granted || []);
+      renderPublish(); pubMsg(); renderPublishCount();
+    }).catch(() => {});
+  }
+  $('#btn-publish').addEventListener('click', openPublish);
+
+  function pubThemeChecks(s) {
+    if (!S.themes.length) return '<p class="muted small">まだ付箋がありません。</p>';
+    return `<div class="pub-themes">
+      <div class="row pub-themes-act">
+        <button type="button" class="link" data-act="all-on">すべて選ぶ</button>
+        <button type="button" class="link" data-act="all-off">すべて外す</button>
+      </div>
+      <div class="pub-theme-list">${S.themes.map(t => `
+        <label class="pub-theme"><input type="checkbox" data-f="theme" value="${esc(t.themeId)}" ${s.themeIds.includes(t.themeId) ? 'checked' : ''}>
+          <span class="dot" style="--c:${esc(t.color)}"></span><span class="pt-title">${esc(t.title)}</span>
+          <span class="muted small">${t.photoIds.filter(isActive).length}枚</span></label>`).join('')}</div></div>`;
+  }
+  function pubCard(s) {
+    const isOpen = !s.allThemes && PUB.open.has(s.email);
+    const changed = PUB.orig.get(s.email) !== pubKey(s);
+    return `<div class="pub-card${s.enabled ? '' : ' off'}${changed ? ' changed' : ''}" data-email="${esc(s.email)}">
+      <div class="pub-head">
+        <div class="pub-who">
+          <strong>${esc(s.nickname || '（未登録の方）')}</strong>
+          <span class="tag g-${GROUPS.indexOf(s.group)}">${esc(s.group)}</span>
+          ${s.registered ? '' : '<span class="tag warn">未登録</span>'}
+          <span class="muted small pub-mail">${esc(s.email)}</span>
+        </div>
+        <label class="switch" title="公開／停止を切り替える">
+          <input type="checkbox" data-f="enabled" ${s.enabled ? 'checked' : ''} aria-label="${esc(pubName(s))} さんへの公開">
+          <span class="switch-ui" aria-hidden="true"></span><span class="switch-txt">${s.enabled ? '公開中' : '停止中'}</span>
+        </label>
+      </div>
+      <div class="pub-opts">
+        <select data-f="group" aria-label="グループ">${GROUPS.map(g => `<option ${g === s.group ? 'selected' : ''}>${g}</option>`).join('')}</select>
+        <select data-f="scope" aria-label="公開する付箋">
+          <option value="select" ${s.allThemes ? '' : 'selected'}>選んだ付箋だけ</option>
+          <option value="all" ${s.allThemes ? 'selected' : ''}>すべての付箋</option>
+        </select>
+        ${s.allThemes ? '<span class="muted small">あとで作った付箋も自動で公開されます</span>'
+          : `<button type="button" class="btn small" data-act="themes" aria-expanded="${isOpen}">${isOpen ? '閉じる' : '付箋を選ぶ'}（${s.themeIds.length}件）</button>`}
+        <span class="spacer"></span>
+        <button type="button" class="link danger" data-act="remove">相手から外す</button>
+      </div>
+      ${isOpen ? pubThemeChecks(s) : ''}
+    </div>`;
+  }
+  function pubTable(list) {
+    if (!S.themes.length) return '<p class="muted">まだ付箋がありません。</p>';
+    const head = list.map(s => `<th scope="col" class="${s.enabled ? '' : 'off'}">
+      <span class="th-name">${esc(pubName(s))}</span>
+      <span class="tag g-${GROUPS.indexOf(s.group)}">${esc(s.group)}</span>
+      ${s.enabled ? '' : '<span class="th-note">停止中</span>'}${s.allThemes ? '<span class="th-note">すべて公開</span>' : ''}</th>`).join('');
+    const rows = S.themes.map(t => `<tr>
+      <th scope="row" class="sticky-col"><span class="th-theme"><span class="dot" style="--c:${esc(t.color)}"></span><span class="pt-title">${esc(t.title)}</span></span></th>
+      <td class="row-act"><button type="button" data-row="on" data-theme="${esc(t.themeId)}">全員</button><button type="button" data-row="off" data-theme="${esc(t.themeId)}">なし</button></td>
+      ${list.map(s => {
+        const on = s.allThemes || s.themeIds.includes(t.themeId);
+        return `<td class="${s.enabled ? '' : 'off'}"><input type="checkbox" data-cell data-email="${esc(s.email)}" data-theme="${esc(t.themeId)}"
+          ${on ? 'checked' : ''} ${s.allThemes ? 'disabled title="すべての付箋を公開中"' : ''} aria-label="「${esc(t.title)}」を${esc(pubName(s))}さんに公開"></td>`;
+      }).join('')}</tr>`).join('');
+    return `<div class="pub-table-wrap"><table class="pub-table">
+      <thead><tr><th scope="col" class="sticky-col">付箋</th><th scope="col" class="row-act">まとめて</th>${head}</tr></thead>
+      <tbody>${rows}</tbody></table></div>
+      <p class="muted small">グレーの列は停止中の相手です（チェックしても再開するまで見えません）。「すべて公開」の相手は「相手ごと」で変更できます。</p>`;
+  }
+  function renderPublish() {
+    $$('#dlg-publish [data-tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === PUB.tab)));
+    $$('#dlg-publish [data-g]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.g === PUB.g)));
+    const list = PUB.list.filter(s => !PUB.g || s.group === PUB.g);
+    const body = $('#pub-body');
+    if (!PUB.list.length) {
+      body.innerHTML = '<p class="pub-empty">まだ公開する相手がいません。上の「公開する相手を追加する」から、家族や友人のメールアドレスを追加してください。</p>';
+      return;
+    }
+    if (!list.length) { body.innerHTML = `<p class="pub-empty">「${esc(PUB.g)}」の相手はいません。</p>`; return; }
+    const on = list.filter(s => s.enabled).length;
+    body.innerHTML = `<p class="muted small pub-sum">${list.length}人（公開中 ${on}人・停止中 ${list.length - on}人）
+      <button type="button" class="link" data-bulk="on">表示中の相手をすべて公開中に</button>
+      <button type="button" class="link" data-bulk="off">すべて停止中に</button></p>` +
+      (PUB.tab === 'people' ? `<div class="pub-cards">${list.map(pubCard).join('')}</div>` : pubTable(list));
+  }
+
+  $$('#dlg-publish [data-tab]').forEach(b => b.addEventListener('click', () => { PUB.tab = b.dataset.tab; renderPublish(); }));
+  $$('#dlg-publish [data-g]').forEach(b => b.addEventListener('click', () => { PUB.g = b.dataset.g; renderPublish(); }));
+
+  $('#pub-body').addEventListener('change', e => {
+    const el = e.target;
+    if (el.matches('[data-cell]')) {
+      const s = pubFind(el.dataset.email);
+      if (!s || s.allThemes) return;
+      const id = el.dataset.theme;
+      s.themeIds = el.checked ? uniq(s.themeIds.concat(id)) : s.themeIds.filter(x => x !== id);
+      return pubMsg();
+    }
+    const card = el.closest('.pub-card');
+    const s = card && pubFind(card.dataset.email);
+    if (!s) return;
+    const f = el.dataset.f;
+    if (f === 'enabled') s.enabled = el.checked;
+    else if (f === 'group') s.group = el.value;
+    else if (f === 'scope') {
+      s.allThemes = el.value === 'all';
+      if (!s.allThemes) PUB.open.add(s.email);
+    } else if (f === 'theme') {
+      s.themeIds = el.checked ? uniq(s.themeIds.concat(el.value)) : s.themeIds.filter(x => x !== el.value);
+      const btn = card.querySelector('[data-act=themes]');
+      if (btn) btn.textContent = `閉じる（${s.themeIds.length}件）`;
+      card.classList.toggle('changed', PUB.orig.get(s.email) !== pubKey(s));
+      return pubMsg();
+    }
+    renderPublish(); pubMsg();
   });
-  $('#share-list').addEventListener('click', async e => {
-    const b = e.target.closest('[data-unshare]');
-    if (!b || !confirm(`${b.dataset.unshare} さんへの閲覧の許可をやめますか？`)) return;
+  $('#pub-body').addEventListener('click', async e => {
+    const bulk = e.target.closest('[data-bulk]');
+    if (bulk) {
+      PUB.list.filter(s => !PUB.g || s.group === PUB.g).forEach(s => { s.enabled = bulk.dataset.bulk === 'on'; });
+      renderPublish(); return pubMsg();
+    }
+    const row = e.target.closest('[data-row]');
+    if (row) {
+      const id = row.dataset.theme, on = row.dataset.row === 'on';
+      PUB.list.filter(s => (!PUB.g || s.group === PUB.g) && !s.allThemes).forEach(s => {
+        s.themeIds = on ? uniq(s.themeIds.concat(id)) : s.themeIds.filter(x => x !== id);
+      });
+      renderPublish(); return pubMsg();
+    }
+    const b = e.target.closest('[data-act]');
+    const card = b && b.closest('.pub-card');
+    const s = card && pubFind(card.dataset.email);
+    if (!s) return;
+    if (b.dataset.act === 'themes') {
+      PUB.open.has(s.email) ? PUB.open.delete(s.email) : PUB.open.add(s.email);
+      return renderPublish();
+    }
+    if (b.dataset.act === 'all-on' || b.dataset.act === 'all-off') {
+      s.themeIds = b.dataset.act === 'all-on' ? S.themes.map(t => t.themeId) : [];
+      renderPublish(); return pubMsg();
+    }
+    if (b.dataset.act === 'remove') {
+      if (!confirm(`${pubName(s)} さんを公開する相手から外しますか？\n（停止中にすれば、設定を残したまま見えなくできます）`)) return;
+      try {
+        const r = await api('removeShare', { email: s.email });
+        S.shares = r.shares;
+        PUB.list = PUB.list.filter(x => x.email !== s.email);
+        PUB.orig.delete(s.email);
+        pubMerge(r.shares.granted || []);
+        renderPublish(); pubMsg(`${pubName(s)} さんを外しました。`);
+        renderShares(); renderBoard();
+      } catch (err) { pubMsg(err.message, 'error'); }
+    }
+  });
+
+  $('#pub-add-btn').addEventListener('click', async () => {
+    const box = $('#pub-add');
+    const q = n => box.querySelector(`[name=${n}]`);
+    const email = q('email').value.trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return pubMsg('メールアドレスを正しく入力してください。', 'error');
+    const btn = $('#pub-add-btn');
+    btn.disabled = true;
     try {
-      const r = await api('removeShare', { email: b.dataset.unshare });
+      const r = await api('addShare', { email, group: q('group').value, allThemes: q('scope').value === 'all', notify: q('notify').checked });
       S.shares = r.shares;
-      renderShares();
+      pubMerge(r.shares.granted || []);
+      const added = (r.shares.granted || []).find(x => x.email === email.toLowerCase());
+      if (added && !added.allThemes) { PUB.open.add(added.email); PUB.tab = 'people'; }
+      PUB.g = '';
+      q('email').value = '';
+      renderPublish(); renderShares();
+      pubMsg(r.registered ? '追加しました。公開する付箋を選んで「変更を保存」を押してください。' : '追加しました（まだ未登録の方です。このメールアドレスで登録すると見られます）。');
+      if (added && added.allThemes) renderBoard();
+    } catch (err) { pubMsg(err.message, 'error'); }
+    finally { btn.disabled = false; }
+  });
+
+  $('#dlg-publish form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const dirty = pubDirty();
+    if (!dirty.length) return;
+    PUB.saving = true; pubMsg('保存しています…');
+    try {
+      const r = await api('updateShares', {
+        shares: dirty.map(s => ({ email: s.email, enabled: s.enabled, allThemes: s.allThemes, group: s.group, themeIds: s.themeIds })),
+      });
+      S.shares = r.shares;
+      pubReset();
+      PUB.saving = false;
+      renderPublish(); pubMsg(`${dirty.length}人分の公開設定を保存しました。`);
+      renderShares(); renderBoard();
+    } catch (err) { PUB.saving = false; pubMsg(err.message, 'error'); }
+  });
+  function closePublish() {
+    if (pubDirty().length && !confirm('保存していない変更があります。保存せずに閉じますか？')) return;
+    $('#dlg-publish').close();
+  }
+  $('#pub-close').addEventListener('click', closePublish);
+  $('#dlg-publish').addEventListener('cancel', e => { e.preventDefault(); closePublish(); });
+
+  /* 付箋のメニュー「公開する相手を選ぶ」 */
+  let TS = null;
+  function openThemeShare(t) {
+    const list = S.shares.granted || [];
+    if (!list.length) {
+      toast('まず「公開の管理」で、公開する相手（家族・友人など）を追加してください。', 'warn');
+      return openPublish();
+    }
+    TS = t;
+    $('#ts-title').textContent = `「${t.title}」を見られる相手にチェックを入れてください。`;
+    $('#ts-list').innerHTML = list.map(s => {
+      const on = s.allThemes || s.themeIds.includes(t.themeId);
+      return `<li class="${s.enabled ? '' : 'off'}"><label>
+        <input type="checkbox" value="${esc(s.email)}" data-group="${esc(s.group)}" ${on ? 'checked' : ''} ${s.allThemes ? 'disabled' : ''}>
+        <span class="ts-name">${esc(pubName(s))}</span>
+        <span class="tag g-${GROUPS.indexOf(s.group)}">${esc(s.group)}</span>
+        ${s.allThemes ? '<span class="muted small">すべての付箋を公開中</span>' : ''}
+        ${s.enabled ? '' : '<span class="tag warn">停止中</span>'}</label></li>`;
+    }).join('');
+    $('#dlg-theme-share').showModal();
+  }
+  $('#ts-quick').addEventListener('click', e => {
+    const b = e.target.closest('[data-pick]');
+    if (!b) return;
+    const g = b.dataset.pick;
+    $$('#ts-list input:not(:disabled)').forEach(i => {
+      if (g === '*') i.checked = true;
+      else if (g === '') i.checked = false;
+      else if (i.dataset.group === g) i.checked = true;
+    });
+  });
+  $('#ts-manage').addEventListener('click', () => { $('#dlg-theme-share').close(); openPublish(); });
+  $('#dlg-theme-share form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const t = TS;
+    if (!t) return;
+    const emails = $$('#ts-list input:not(:disabled)').filter(i => i.checked).map(i => i.value);
+    try {
+      const r = await api('setThemeShare', { themeId: t.themeId, emails });
+      S.shares = r.shares;
+      $('#dlg-theme-share').close();
+      replaceNote(t); renderShares();
+      const n = sharedTo(t).length;
+      toast(n ? `「${t.title}」を ${n}人に公開しています。` : `「${t.title}」は、だれにも公開していません。`);
     } catch (err) { toast(err.message, 'error'); }
   });
 

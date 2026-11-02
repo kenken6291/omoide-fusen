@@ -1,6 +1,6 @@
 /**
  * おもいで付箋ボード (omoide-fusen) — Google Apps Script バックエンド
- * Version 1.7.1
+ * Version 1.8.0
  *
  * ── スクリプトプロパティ ──────────────────────────────
  *   GEMINI_API_KEY          (必須) Google AI Studio の API キー
@@ -26,7 +26,7 @@
  *   ※ コードを変更したら「デプロイを管理 > 編集 > 新バージョン」で再デプロイ
  */
 
-const APP_VERSION = '1.7.1';
+const APP_VERSION = '1.8.0';
 
 const DEF = {
   users:    { name: 'Users',    cols: ['email', 'nickname', 'passwordHash', 'salt', 'isFirstLogin', 'failCount', 'lockedUntil', 'folderId', 'homeFolderId', 'createdAt', 'lastLoginAt'] },
@@ -34,7 +34,8 @@ const DEF = {
   photos:   { name: 'Photos',   cols: ['fileId', 'email', 'fileName', 'mimeType', 'takenAt', 'lat', 'lng', 'place', 'tags', 'mood', 'scene', 'description', 'status', 'analyzedAt', 'addedAt', 'md5', 'fileSize', 'dupOf'] },
   themes:   { name: 'Themes',   cols: ['themeId', 'email', 'title', 'color', 'x', 'y', 'photoIds', 'coverFileId', 'narration', 'earthVideoUrl', 'createdAt', 'updatedAt', 'excludedIds'] },
   comments: { name: 'Comments', cols: ['commentId', 'email', 'fileId', 'text', 'type', 'createdAt'] },
-  shares:   { name: 'Shares',   cols: ['ownerEmail', 'viewerEmail', 'createdAt'] },
+  // v1.8.0: enabled（公開中/停止中）・allThemes（すべての付箋）・themeIds（公開する付箋）・groupName（家族/友人/その他）を追加
+  shares:   { name: 'Shares',   cols: ['ownerEmail', 'viewerEmail', 'createdAt', 'enabled', 'allThemes', 'themeIds', 'groupName', 'updatedAt'] },
 };
 
 const SESSION_DAYS = 30;
@@ -43,6 +44,8 @@ const LOCK_MINUTES = 15;
 const MAX_NARRATION_PHOTOS = 24;
 const SCAN_DEPTH = 2;          // 指定フォルダから何階層下まで読むか
 const SCAN_MAX_FILES = 4000;   // 1回の読み込みで扱う画像の上限
+const MAX_SHARES = 50;         // 公開できる相手の上限
+const SHARE_GROUPS = ['家族', '友人', 'その他'];
 
 /** 閲覧のみ許可された会員が使える操作 */
 const READONLY_ACTIONS = ['bootstrap', 'getImages', 'listComments', 'tts', 'listThemes', 'listPhotos', 'getImage'];
@@ -111,11 +114,13 @@ function doPost(e) {
       const asOwner = normEmail_(req.asOwner);
       if (asOwner && asOwner !== user.email) {
         if (READONLY_ACTIONS.indexOf(action) < 0) throw err_('閲覧のみ許可されたボードでは、この操作はできません。', 'READONLY');
-        if (!hasShare_(asOwner, user.email)) throw err_('このボードの閲覧は許可されていません。', 'NOSHARE');
         const owner = findUser_(asOwner);
         if (!owner) throw err_('ボードの持ち主が見つかりません。', 'NOSHARE');
+        const access = shareAccess_(asOwner, user.email);
+        if (!access) throw err_('このボードは、いまは公開されていません。', 'NOSHARE');
         ctx.owner = owner;
         ctx.readOnly = true;
+        ctx.access = access;
       }
       res = PRIVATE_ACTIONS[action](req, ctx.owner, ctx);
     } else {
@@ -172,13 +177,15 @@ const PRIVATE_ACTIONS = {
   listShares: listShares_,
   addShare: addShare_,
   removeShare: removeShare_,
+  updateShares: updateShares_,
+  setThemeShare: setThemeShare_,
   // Excel
   importData: importData_,
   // 旧バージョン（v1.0.x）の画面が残っていても動くように残している互換用の操作
-  listThemes: (req, u) => ({ themes: rows_(DEF.themes).filter(r => r.email === u.email).map(themePub_) }),
-  listPhotos: (req, u) => ({ photos: rows_(DEF.photos).filter(r => r.email === u.email).map(photoPub_) }),
-  getImage: (req, u) => {
-    const r = getImages_({ fileIds: [req.fileId], size: req.size }, u);
+  listThemes: (req, u, ctx) => ({ themes: visibleThemes_(u, ctx).map(r => themeOut_(r, ctx)) }),
+  listPhotos: (req, u, ctx) => ({ photos: visiblePhotos_(u, ctx).map(photoPub_) }),
+  getImage: (req, u, ctx) => {
+    const r = getImages_({ fileIds: [req.fileId], size: req.size }, u, ctx);
     const dataUrl = r.images[req.fileId];
     if (!dataUrl) throw err_('この写真は表示できません。');
     return { dataUrl };
@@ -322,8 +329,8 @@ function userPub_(u) {
 
 /** 起動時に必要なデータを1回で返す（通信回数を減らして高速化） */
 function bootstrap_(req, u, ctx) {
-  const themes = rows_(DEF.themes).filter(r => r.email === u.email).map(themePub_);
-  const photos = rows_(DEF.photos).filter(r => r.email === u.email).map(photoPub_);
+  const themes = visibleThemes_(u, ctx).map(r => themeOut_(r, ctx));
+  const photos = visiblePhotos_(u, ctx).map(photoPub_);
   if (ctx && ctx.readOnly) {
     return { readOnly: true, owner: { email: u.email, nickname: u.nickname }, themes, photos };
   }
@@ -353,49 +360,169 @@ function diag_(req, u, ctx) {
 }
 
 /* ================================================================
- * 閲覧の共有
+ * 公開（指定した会員だけに付箋を見せる）
+ *   Shares の1行＝「持ち主 → 相手」1組
+ *   enabled   … TRUE で公開中、FALSE で停止中（行は残るので、いつでも再開できる）
+ *   allThemes … TRUE なら付箋すべて（あとで作った付箋も含む）、FALSE なら themeIds の付箋だけ
+ *   v1.7 以前の行は enabled・allThemes が空 → 従来どおり「公開中・すべての付箋」として扱う
  * ================================================================ */
-function hasShare_(ownerEmail, viewerEmail) {
-  return rows_(DEF.shares).some(r => r.ownerEmail === ownerEmail && r.viewerEmail === viewerEmail);
+function boolOr_(v, def) { return (v === '' || v === null || v === undefined) ? def : isTrue_(v); }
+function shareGroup_(g) { g = String(g || '').trim(); return SHARE_GROUPS.indexOf(g) >= 0 ? g : 'その他'; }
+function shareEnabled_(r) { return boolOr_(r.enabled, true); }
+function shareAll_(r) { return boolOr_(r.allThemes, true); }
+
+function findShare_(ownerEmail, viewerEmail) {
+  return rows_(DEF.shares).find(r => r.ownerEmail === ownerEmail && r.viewerEmail === viewerEmail) || null;
+}
+function hasShare_(ownerEmail, viewerEmail) { return !!findShare_(ownerEmail, viewerEmail); }
+
+/** 閲覧する会員が見てよい付箋と写真。見られるものが無ければ null */
+function shareAccess_(ownerEmail, viewerEmail) {
+  const sh = findShare_(ownerEmail, viewerEmail);
+  if (!sh || !shareEnabled_(sh)) return null;
+  const all = shareAll_(sh);
+  const allowed = {};
+  parseArr_(sh.themeIds).forEach(id => { allowed[id] = true; });
+  const themes = {}, photos = {};
+  let n = 0;
+  rows_(DEF.themes).forEach(t => {
+    if (t.email !== ownerEmail || !(all || allowed[t.themeId])) return;
+    themes[t.themeId] = true; n++;
+    parseArr_(t.photoIds).forEach(id => { photos[id] = true; });
+  });
+  return n ? { themes, photos, count: n } : null;
+}
+
+/** 表示してよい付箋（自分のボードなら全部） */
+function visibleThemes_(u, ctx) {
+  const mine = rows_(DEF.themes).filter(r => r.email === u.email);
+  return ctx && ctx.readOnly ? mine.filter(r => ctx.access && ctx.access.themes[r.themeId]) : mine;
+}
+/** 表示してよい写真（閲覧のみなら公開された付箋に入っている写真だけ） */
+function visiblePhotos_(u, ctx) {
+  const mine = rows_(DEF.photos).filter(r => r.email === u.email);
+  return ctx && ctx.readOnly ? mine.filter(r => ctx.access && ctx.access.photos[r.fileId]) : mine;
+}
+/** 閲覧のみの相手には、外した写真の一覧など持ち主用の情報を渡さない */
+function themeOut_(r, ctx) {
+  const t = themePub_(r);
+  if (ctx && ctx.readOnly) t.excludedIds = [];
+  return t;
+}
+
+function sharePub_(r, nick, ownThemes) {
+  const all = shareAll_(r);
+  return {
+    email: r.viewerEmail,
+    nickname: nick[r.viewerEmail] || '',
+    registered: nick[r.viewerEmail] !== undefined,
+    enabled: shareEnabled_(r),
+    allThemes: all,
+    themeIds: parseArr_(r.themeIds).filter(id => ownThemes[id]),
+    group: shareGroup_(r.groupName),
+    createdAt: r.createdAt,
+  };
 }
 
 function listShares_(req, u) {
   const all = rows_(DEF.shares);
   const nick = {};
   rows_(DEF.users).forEach(r => { nick[r.email] = r.nickname; });
+  const ownThemes = {};
+  rows_(DEF.themes).forEach(t => { if (t.email === u.email) ownThemes[t.themeId] = true; });
   return {
     granted: all.filter(r => r.ownerEmail === u.email)
-      .map(r => ({ email: r.viewerEmail, nickname: nick[r.viewerEmail] || '', registered: !!nick[r.viewerEmail] })),
-    sharedWithMe: all.filter(r => r.viewerEmail === u.email)
-      .filter(r => nick[r.ownerEmail] !== undefined)
-      .map(r => ({ email: r.ownerEmail, nickname: nick[r.ownerEmail] || '' })),
+      .map(r => sharePub_(r, nick, ownThemes))
+      .sort((a, b) => SHARE_GROUPS.indexOf(a.group) - SHARE_GROUPS.indexOf(b.group) || String(a.createdAt).localeCompare(String(b.createdAt))),
+    // 自分に公開されているボード（停止中・公開された付箋が0件のものは出さない）
+    sharedWithMe: all.filter(r => r.viewerEmail === u.email && nick[r.ownerEmail] !== undefined)
+      .map(r => ({ r, a: shareAccess_(r.ownerEmail, u.email) }))
+      .filter(x => x.a)
+      .map(x => ({ email: x.r.ownerEmail, nickname: nick[x.r.ownerEmail] || '', count: x.a.count })),
   };
+}
+
+function ownThemeIds_(email, ids) {
+  const own = {};
+  rows_(DEF.themes).forEach(t => { if (t.email === email) own[t.themeId] = true; });
+  return unique_((Array.isArray(ids) ? ids : []).map(String).filter(id => own[id]));
 }
 
 function addShare_(req, u) {
   const email = normEmail_(req.email);
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw err_('メールアドレスの形式が正しくありません。');
   if (email === u.email) throw err_('自分自身は追加できません。');
+  const all = !!req.allThemes;
+  const themeIds = all ? [] : ownThemeIds_(u.email, req.themeIds);
   withLock_(() => {
-    if (hasShare_(u.email, email)) throw err_('この会員にはすでに閲覧を許可しています。');
-    if (rows_(DEF.shares).filter(r => r.ownerEmail === u.email).length >= 50) throw err_('閲覧を許可できるのは50人までです。');
-    insert_(DEF.shares, { ownerEmail: u.email, viewerEmail: email, createdAt: now_() });
+    if (hasShare_(u.email, email)) throw err_('この会員はすでに公開する相手に入っています。');
+    if (rows_(DEF.shares).filter(r => r.ownerEmail === u.email).length >= MAX_SHARES) throw err_('公開する相手は' + MAX_SHARES + '人までです。');
+    insert_(DEF.shares, {
+      ownerEmail: u.email, viewerEmail: email, createdAt: now_(),
+      enabled: 'TRUE', allThemes: all ? 'TRUE' : 'FALSE', themeIds: JSON.stringify(themeIds),
+      groupName: shareGroup_(req.group), updatedAt: now_(),
+    });
   });
   const registered = !!findUser_(email);
-  sendMail_(email, '【おもいで付箋ボード】' + u.nickname + ' さんがボードの閲覧を許可しました',
-    u.nickname + ' さんが、あなたに「おもいで付箋ボード」の閲覧を許可しました。\n\n' +
-    (registered
-      ? 'ログイン後、画面上部の「ボード」から ' + u.nickname + ' さんのボードを選ぶと見られます（閲覧のみ）。\n'
-      : 'このメールアドレスで新規登録すると、' + u.nickname + ' さんのボードを見られるようになります（閲覧のみ）。\n') +
-    appUrlLine_());
+  if (req.notify !== false) {
+    sendMail_(email, '【おもいで付箋ボード】' + u.nickname + ' さんがあなたに付箋を公開しました',
+      u.nickname + ' さんが、あなたを「おもいで付箋ボード」の公開相手に加えました。\n\n' +
+      (registered
+        ? 'ログイン後、画面上部の「ボード」から ' + u.nickname + ' さんのボードを選ぶと、公開された付箋を見られます（閲覧のみ）。\n'
+        : 'このメールアドレスで会員登録すると、' + u.nickname + ' さんが公開した付箋を見られるようになります（閲覧のみ）。\n') +
+      (all ? '' : '※ ' + u.nickname + ' さんが付箋を選んで公開するまでは、ボードは表示されません。\n') +
+      appUrlLine_());
+  }
   return { shares: listShares_(req, u), registered };
 }
 
 function removeShare_(req, u) {
   const email = normEmail_(req.email);
   withLock_(() => {
-    const r = rows_(DEF.shares).find(x => x.ownerEmail === u.email && x.viewerEmail === email);
+    const r = findShare_(u.email, email);
     if (r) deleteRows_(DEF.shares, [r._row]);
+  });
+  return { shares: listShares_(req, u) };
+}
+
+/** 公開の管理画面からまとめて保存：[{email, enabled, allThemes, themeIds, group}] */
+function updateShares_(req, u) {
+  const list = Array.isArray(req.shares) ? req.shares : [];
+  if (!list.length) return { shares: listShares_(req, u) };
+  withLock_(() => {
+    const own = {};
+    rows_(DEF.themes).forEach(t => { if (t.email === u.email) own[t.themeId] = true; });
+    const ups = [];
+    list.forEach(x => {
+      const r = findShare_(u.email, normEmail_(x && x.email));
+      if (!r) return;
+      const o = { updatedAt: now_() };
+      if (x.enabled !== undefined) o.enabled = x.enabled ? 'TRUE' : 'FALSE';
+      if (x.allThemes !== undefined) o.allThemes = x.allThemes ? 'TRUE' : 'FALSE';
+      if (x.group !== undefined) o.groupName = shareGroup_(x.group);
+      if (Array.isArray(x.themeIds)) o.themeIds = unique_(x.themeIds.map(String).filter(id => own[id]));
+      ups.push({ row: r._row, obj: o });
+    });
+    patchMany_(DEF.shares, ups);
+  });
+  return { shares: listShares_(req, u) };
+}
+
+/** 1枚の付箋について、公開する相手を決める（emails に入っている相手に公開、入っていない相手は非公開） */
+function setThemeShare_(req, u) {
+  const themeId = String(req.themeId || '');
+  const on = {};
+  (Array.isArray(req.emails) ? req.emails : []).forEach(e => { on[normEmail_(e)] = true; });
+  withLock_(() => {
+    findTheme_(u, themeId);
+    const ups = [];
+    rows_(DEF.shares).filter(r => r.ownerEmail === u.email && !shareAll_(r)).forEach(r => {
+      const ids = parseArr_(r.themeIds);
+      const has = ids.indexOf(themeId) >= 0;
+      if (on[r.viewerEmail] && !has) ups.push({ row: r._row, obj: { themeIds: ids.concat([themeId]), updatedAt: now_() } });
+      if (!on[r.viewerEmail] && has) ups.push({ row: r._row, obj: { themeIds: ids.filter(id => id !== themeId), updatedAt: now_() } });
+    });
+    patchMany_(DEF.shares, ups);
   });
   return { shares: listShares_(req, u) };
 }
@@ -924,9 +1051,11 @@ function analyzeBatch_(req, u) {
 }
 
 /** サムネイルをまとめて返す（最大16枚。CacheService＋並列取得） */
-function getImages_(req, u) {
+function getImages_(req, u, ctx) {
   const own = ownSet_(u.email);
-  const ids = unique_((Array.isArray(req.fileIds) ? req.fileIds : []).map(String)).filter(id => own[id]).slice(0, 16);
+  const ro = ctx && ctx.readOnly;
+  const ids = unique_((Array.isArray(req.fileIds) ? req.fileIds : []).map(String))
+    .filter(id => own[id] && (!ro || (ctx.access && ctx.access.photos[id]))).slice(0, 16);
   const size = req.size === 'full' ? 1600 : (req.size === 'mid' ? 900 : 320);
   const cache = CacheService.getScriptCache();
   const hit = ids.length ? cache.getAll(ids.map(id => 'img:' + id + ':' + size)) : {};
@@ -1503,11 +1632,13 @@ function commentPub_(r) {
   return { commentId: r.commentId, fileId: r.fileId, text: r.text, type: r.type, createdAt: r.createdAt };
 }
 
-function listComments_(req, u) {
+function listComments_(req, u, ctx) {
   const ids = {};
   (Array.isArray(req.fileIds) ? req.fileIds : [req.fileId]).forEach(id => { ids[id] = true; });
+  const ro = ctx && ctx.readOnly;
   const comments = rows_(DEF.comments)
     .filter(r => r.email === u.email && (req.all || ids[r.fileId]))
+    .filter(r => !ro || (ctx.access && ctx.access.photos[r.fileId]))
     .map(commentPub_)
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
   return { comments };

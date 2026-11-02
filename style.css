@@ -611,3 +611,103 @@ body.readonly .note { cursor: pointer; }
 .test-result { white-space: pre-wrap; font-family: var(--ui); font-size: .85rem; background: #F4F6F9; border-radius: 8px; padding: 10px 12px; margin: 0 0 8px; }
 .test-result.ok { background: #EAF6E4; }
 .test-result.ng { background: #FDECEC; }
+
+/* ---------- v1.8 追加：公開の管理（指定した会員にだけ公開） ---------- */
+.note-share {
+  position: absolute; left: -10px; top: -10px;
+  background: var(--ink); color: #fff; font-weight: 700; font-size: .75rem;
+  border-radius: 999px; padding: .3em .7em; box-shadow: 0 2px 5px rgba(0, 0, 0, .22);
+}
+.tag { display: inline-block; font-size: .72rem; font-weight: 700; border-radius: 999px; padding: .1em .6em; background: #E7ECF2; color: var(--ink); white-space: nowrap; }
+.tag.g-0 { background: #FFE0EA; color: #8E2048; }
+.tag.g-1 { background: #DDF1F7; color: #11586B; }
+.tag.g-2 { background: #ECEFF3; color: var(--ink-soft); }
+.tag.warn { background: #FFF1D6; color: #8A5A00; }
+.dot { display: inline-block; width: 12px; height: 12px; border-radius: 3px; background: var(--c, var(--y)); box-shadow: 0 0 0 1px rgba(0, 0, 0, .15); flex: none; }
+
+.pub-add { background: #F1F5FB; border-radius: 10px; padding: 10px 12px; margin: 10px 0 12px; }
+.pub-add summary { cursor: pointer; font-weight: 700; color: var(--marker); }
+.pub-add[open] summary { margin-bottom: 10px; }
+.pub-add-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1.3fr); gap: 8px; }
+.pub-add-grid .field { margin-bottom: 8px; }
+.pub-add .row { flex-wrap: wrap; }
+
+.pub-bar { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.pub-tabs, .pub-filter { display: inline-flex; background: #EEF2F7; border-radius: 999px; padding: 3px; gap: 2px; }
+.pub-tabs button, .pub-filter button {
+  border: 0; background: none; border-radius: 999px; padding: .38em .9em; font: inherit; font-size: .85rem; cursor: pointer; color: var(--ink-soft);
+}
+.pub-tabs [aria-selected=true], .pub-filter [aria-pressed=true] { background: #fff; color: var(--ink); font-weight: 700; box-shadow: 0 1px 2px rgba(0, 0, 0, .12); }
+.pub-body { min-height: 120px; }
+.pub-empty { background: #F7F9FB; border: 1.5px dashed #C2CBD5; border-radius: 10px; padding: 18px; text-align: center; color: var(--ink-soft); margin: 0; }
+.pub-sum { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; margin: 0 0 8px; }
+
+.pub-cards { display: flex; flex-direction: column; gap: 8px; }
+.pub-card { border: 1.5px solid #DCE2E9; border-radius: 12px; padding: 10px 12px; background: #fff; transition: background .2s, border-color .2s; }
+.pub-card.off { background: #F4F6F8; }
+.pub-card.off .pub-who strong { color: var(--ink-soft); }
+.pub-card.changed { border-color: var(--marker); }
+.pub-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.pub-who { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
+.pub-mail { word-break: break-all; }
+.pub-opts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.pub-opts select { width: auto; padding: .4em .6em; font-size: .9rem; }
+.pub-opts .spacer { flex: 1; }
+.pub-themes { margin-top: 10px; border-top: 1px dashed #DCE2E9; padding-top: 8px; }
+.pub-themes-act { gap: 14px; margin-bottom: 6px; }
+.pub-theme-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 4px 12px; max-height: 32vh; overflow: auto; }
+.pub-theme { display: flex; align-items: center; gap: 8px; padding: 4px 2px; font-size: .9rem; cursor: pointer; min-width: 0; }
+.pub-theme input { width: 18px; height: 18px; flex: none; }
+.pt-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.pub-theme .pt-title { flex: 1; }
+
+/* 公開／停止のスイッチ */
+.switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; flex: none; font-size: .85rem; font-weight: 700; }
+.switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.switch-ui { position: relative; width: 46px; height: 26px; border-radius: 999px; background: #B9C2CC; transition: background .2s; }
+.switch-ui::after { content: ""; position: absolute; left: 3px; top: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .3); transition: transform .2s; }
+.switch input:checked + .switch-ui { background: #2E9B5F; }
+.switch input:checked + .switch-ui::after { transform: translateX(20px); }
+.switch input:focus-visible + .switch-ui { outline: 3px solid var(--marker); outline-offset: 2px; }
+.switch-txt { min-width: 3.5em; }
+.pub-card.off .switch-txt { color: var(--ink-soft); }
+
+/* 付箋ごとの一覧表 */
+.pub-table-wrap { overflow: auto; max-height: 52vh; border: 1px solid #DCE2E9; border-radius: 10px; }
+.pub-table { border-collapse: separate; border-spacing: 0; font-size: .86rem; min-width: 100%; }
+.pub-table th, .pub-table td { padding: 6px 8px; border-bottom: 1px solid #EDF0F4; background: #fff; text-align: center; }
+.pub-table thead th { position: sticky; top: 0; z-index: 2; background: #F7F9FB; vertical-align: bottom; min-width: 76px; }
+.pub-table thead th.sticky-col { z-index: 3; }
+.pub-table .sticky-col { position: sticky; left: 0; z-index: 1; text-align: left; max-width: 11em; box-shadow: 1px 0 0 #DCE2E9; }
+.pub-table tbody th.sticky-col { font-weight: 600; }
+.th-theme { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.pub-table .th-name { display: block; max-width: 7em; margin: 0 auto 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pub-table .th-note { display: block; font-size: .7rem; color: var(--ink-soft); font-weight: 400; margin-top: 2px; }
+.pub-table .off { background: #F1F3F6; opacity: .7; }
+.pub-table input[type=checkbox] { width: 20px; height: 20px; cursor: pointer; }
+.pub-table input:disabled { cursor: not-allowed; }
+.pub-table .row-act { white-space: nowrap; }
+.pub-table .row-act button { border: 1px solid #C2CBD5; background: #fff; border-radius: 6px; font-size: .75rem; padding: .2em .5em; cursor: pointer; margin: 0 1px; }
+.pub-table .row-act button:hover { background: #EEF2F7; }
+.pub-table tbody tr:hover td, .pub-table tbody tr:hover th { background: #FAFBFD; }
+
+.pub-dirty { font-weight: 700; color: var(--marker); }
+.pub-dirty[data-type=error] { color: var(--red); }
+
+/* 付箋ごとの公開相手 */
+.ts-list { list-style: none; margin: 0 0 10px; padding: 0; max-height: 46vh; overflow: auto; }
+.ts-list li { border-bottom: 1px dashed #E3E7EC; }
+.ts-list label { display: flex; align-items: center; gap: 8px; padding: 8px 2px; cursor: pointer; flex-wrap: wrap; }
+.ts-list input { width: 20px; height: 20px; flex: none; }
+.ts-list .ts-name { font-weight: 700; }
+.ts-list li.off .ts-name { color: var(--ink-soft); }
+
+@media (max-width: 560px) {
+  .pub-add-grid { grid-template-columns: 1fr 1fr; }
+  .pub-add-grid .field:first-child { grid-column: 1 / -1; }
+  .pub-bar { flex-direction: column; align-items: stretch; }
+  .pub-tabs, .pub-filter { justify-content: center; }
+  .pub-head { align-items: flex-start; }
+}
+#ts-quick { margin: 8px 0 10px; }
+.pub-opts select { padding-right: 2em; }
