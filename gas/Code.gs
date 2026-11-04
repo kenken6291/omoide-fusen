@@ -1,6 +1,6 @@
 /**
  * おもいで付箋ボード (omoide-fusen) — Google Apps Script バックエンド
- * Version 1.8.0
+ * Version 1.8.1
  *
  * ── スクリプトプロパティ ──────────────────────────────
  *   GEMINI_API_KEY          (必須) Google AI Studio の API キー
@@ -26,7 +26,7 @@
  *   ※ コードを変更したら「デプロイを管理 > 編集 > 新バージョン」で再デプロイ
  */
 
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.8.1';
 
 const DEF = {
   users:    { name: 'Users',    cols: ['email', 'nickname', 'passwordHash', 'salt', 'isFirstLogin', 'failCount', 'lockedUntil', 'folderId', 'homeFolderId', 'createdAt', 'lastLoginAt'] },
@@ -179,6 +179,7 @@ const PRIVATE_ACTIONS = {
   removeShare: removeShare_,
   updateShares: updateShares_,
   setThemeShare: setThemeShare_,
+  openLink: openLink_,
   // Excel
   importData: importData_,
   // 旧バージョン（v1.0.x）の画面が残っていても動くように残している互換用の操作
@@ -324,7 +325,33 @@ function auth_(token, action) {
 }
 
 function userPub_(u) {
-  return { email: u.email, nickname: u.nickname, isFirstLogin: isTrue_(u.isFirstLogin) };
+  return { email: u.email, nickname: u.nickname, isFirstLogin: isTrue_(u.isFirstLogin), boardKey: boardKey_(u.email) };
+}
+
+/** 共有リンク用のボードの鍵（メールアドレスをURLに出さないため） */
+function boardKey_(email) { return digest_('board|' + email + '|' + prop_('PEPPER', '')).slice(0, 16); }
+
+/**
+ * 共有リンク（?fusen=付箋ID または ?b=ボードの鍵）を開く。
+ * 自分の付箋か、自分に公開されている付箋・ボードのときだけ持ち主を返す。
+ */
+function openLink_(req, u) {
+  const themeId = String(req.fusen || '').trim();
+  const key = String(req.board || '').trim();
+  let owner = null, theme = null;
+  if (themeId) {
+    theme = rows_(DEF.themes).find(t => t.themeId === themeId) || null;
+    if (!theme) throw err_('この付箋は見つかりませんでした（はがされた可能性があります）。', 'NOLINK');
+    owner = findUser_(theme.email);
+  } else if (key) {
+    owner = rows_(DEF.users).find(x => boardKey_(x.email) === key) || null;
+  }
+  if (!owner) throw err_('リンク先のボードが見つかりませんでした。', 'NOLINK');
+  if (owner.email === u.email) return { self: true, themeId: theme ? theme.themeId : '' };
+  const a = shareAccess_(owner.email, u.email);
+  if (!a) throw err_(owner.nickname + ' さんのボードは、いまはあなたに公開されていません。', 'NOLINK');
+  if (theme && !a.themes[theme.themeId]) throw err_('この付箋は、いまはあなたに公開されていません。', 'NOLINK');
+  return { self: false, owner: { email: owner.email, nickname: owner.nickname, count: a.count }, themeId: theme ? theme.themeId : '' };
 }
 
 /** 起動時に必要なデータを1回で返す（通信回数を減らして高速化） */
@@ -364,12 +391,12 @@ function diag_(req, u, ctx) {
  *   Shares の1行＝「持ち主 → 相手」1組
  *   enabled   … TRUE で公開中、FALSE で停止中（行は残るので、いつでも再開できる）
  *   allThemes … TRUE なら付箋すべて（あとで作った付箋も含む）、FALSE なら themeIds の付箋だけ
- *   v1.7 以前の行は enabled・allThemes が空 → 従来どおり「公開中・すべての付箋」として扱う
+ *   既定は非公開：enabled・allThemes が空の行（v1.7 以前の「閲覧の許可」）は「停止中・選んだ付箋0件」として扱う
  * ================================================================ */
 function boolOr_(v, def) { return (v === '' || v === null || v === undefined) ? def : isTrue_(v); }
 function shareGroup_(g) { g = String(g || '').trim(); return SHARE_GROUPS.indexOf(g) >= 0 ? g : 'その他'; }
-function shareEnabled_(r) { return boolOr_(r.enabled, true); }
-function shareAll_(r) { return boolOr_(r.allThemes, true); }
+function shareEnabled_(r) { return boolOr_(r.enabled, false); }
+function shareAll_(r) { return boolOr_(r.allThemes, false); }
 
 function findShare_(ownerEmail, viewerEmail) {
   return rows_(DEF.shares).find(r => r.ownerEmail === ownerEmail && r.viewerEmail === viewerEmail) || null;
@@ -452,7 +479,8 @@ function addShare_(req, u) {
   const email = normEmail_(req.email);
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw err_('メールアドレスの形式が正しくありません。');
   if (email === u.email) throw err_('自分自身は追加できません。');
-  const all = !!req.allThemes;
+  // 既定は非公開：付箋を選ぶまで（または「すべての付箋」を選ぶまで）相手には何も見えない
+  const all = req.allThemes === true;
   const themeIds = all ? [] : ownThemeIds_(u.email, req.themeIds);
   withLock_(() => {
     if (hasShare_(u.email, email)) throw err_('この会員はすでに公開する相手に入っています。');
@@ -519,7 +547,10 @@ function setThemeShare_(req, u) {
     rows_(DEF.shares).filter(r => r.ownerEmail === u.email && !shareAll_(r)).forEach(r => {
       const ids = parseArr_(r.themeIds);
       const has = ids.indexOf(themeId) >= 0;
-      if (on[r.viewerEmail] && !has) ups.push({ row: r._row, obj: { themeIds: ids.concat([themeId]), updatedAt: now_() } });
+      // チェックした相手が停止中なら、公開中に切り替える（その場ですぐ見られるように）
+      const wake = on[r.viewerEmail] && !shareEnabled_(r) ? { enabled: 'TRUE' } : {};
+      if (on[r.viewerEmail] && !has) ups.push({ row: r._row, obj: Object.assign({ themeIds: ids.concat([themeId]), updatedAt: now_() }, wake) });
+      else if (on[r.viewerEmail] && wake.enabled) ups.push({ row: r._row, obj: Object.assign({ updatedAt: now_() }, wake) });
       if (!on[r.viewerEmail] && has) ups.push({ row: r._row, obj: { themeIds: ids.filter(id => id !== themeId), updatedAt: now_() } });
     });
     patchMany_(DEF.shares, ups);

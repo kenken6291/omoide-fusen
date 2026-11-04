@@ -1,4 +1,4 @@
-/* おもいで付箋ボード — app.js  v1.8.0 */
+/* おもいで付箋ボード — app.js  v1.8.1 */
 (() => {
   'use strict';
 
@@ -28,7 +28,7 @@
   /** 閲覧のみのボードで使える操作（サーバー側の READONLY_ACTIONS と同じ） */
   const RO_ACTIONS = new Set(['bootstrap', 'getImages', 'listComments', 'tts']);
   /** 閲覧中でも自分のアカウントに対して行う操作 */
-  const ACCOUNT_ACTIONS = new Set(['logout', 'listShares', 'addShare', 'removeShare', 'usage', 'me', 'changePassword']);
+  const ACCOUNT_ACTIONS = new Set(['logout', 'listShares', 'addShare', 'removeShare', 'usage', 'me', 'changePassword', 'openLink']);
   const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   const S = {
@@ -398,6 +398,7 @@
     $('#auth').hidden = true; $('#app').hidden = false;
     await loadBoard();
     afterBoardLoaded();
+    await openPendingLink();
   }
   async function loadBoard() {
     loadView(); applyView();
@@ -467,7 +468,7 @@
     });
   }
   /* 画面とGASのバージョンが合っていないときに一度だけ知らせる */
-  const MIN_SERVER = '1.8.0';
+  const MIN_SERVER = '1.8.1';
   let versionWarned = false;
   function cmpVer(a, b) {
     const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number);
@@ -732,6 +733,7 @@
     if (act === 'organize') return openOrganize(t);
     if (act === 'edit') return openEdit(t);
     if (act === 'share') return openThemeShare(t);
+    if (act === 'send') return openThemeShare(t, true);
     if (act === 'earth') return openEarth(t);
     if (act === 'delete') {
       if (!confirm(`「${t.title}」の付箋をはがしますか？（写真そのものは消えません）`)) return;
@@ -1177,7 +1179,7 @@
         </div>
         <label class="switch" title="公開／停止を切り替える">
           <input type="checkbox" data-f="enabled" ${s.enabled ? 'checked' : ''} aria-label="${esc(pubName(s))} さんへの公開">
-          <span class="switch-ui" aria-hidden="true"></span><span class="switch-txt">${s.enabled ? '公開中' : '停止中'}</span>
+          <span class="switch-ui" aria-hidden="true"></span><span class="switch-txt">${!s.enabled ? '停止中' : (s.allThemes || s.themeIds.length) ? '公開中' : '付箋未選択'}</span>
         </label>
       </div>
       <div class="pub-opts">
@@ -1192,6 +1194,7 @@
         <button type="button" class="link danger" data-act="remove">相手から外す</button>
       </div>
       ${isOpen ? pubThemeChecks(s) : ''}
+      ${!changed && s.enabled && (s.allThemes || s.themeIds.length) ? `<div class="pub-send"><span class="muted small">${esc(pubName(s))} さんに知らせる：</span>${sendButtons(boardMessage(s), boardUrl(), 'small')}</div>` : ''}
     </div>`;
   }
   function pubTable(list) {
@@ -1347,7 +1350,7 @@
 
   /* 付箋のメニュー「公開する相手を選ぶ」 */
   let TS = null;
-  function openThemeShare(t) {
+  function openThemeShare(t, focusSend) {
     const list = S.shares.granted || [];
     if (!list.length) {
       toast('まず「公開の管理」で、公開する相手（家族・友人など）を追加してください。', 'warn');
@@ -1364,7 +1367,30 @@
         ${s.allThemes ? '<span class="muted small">すべての付箋を公開中</span>' : ''}
         ${s.enabled ? '' : '<span class="tag warn">停止中</span>'}</label></li>`;
     }).join('');
-    $('#dlg-theme-share').showModal();
+    TS_DIRTY = false;
+    renderThemeSend();
+    if (!$('#dlg-theme-share').open) $('#dlg-theme-share').showModal();
+    if (focusSend) $('#ts-send').scrollIntoView({ block: 'nearest' });
+  }
+  let TS_DIRTY = false;
+  $('#ts-list').addEventListener('change', () => { TS_DIRTY = true; renderThemeSend(); });
+  /** 公開した付箋を、その場で LINE などで知らせる */
+  function renderThemeSend(msg) {
+    const t = TS, box = $('#ts-send');
+    if (!t) return;
+    const to = sharedTo(t);
+    if (TS_DIRTY) {
+      box.innerHTML = '<p class="muted small">チェックを変えました。「保存する」を押すと、LINEなどで知らせられます。</p>';
+      return;
+    }
+    if (!to.length) {
+      box.innerHTML = '<p class="muted small">この付箋は非公開です。公開する相手にチェックを入れて「保存する」を押すと、LINEなどで知らせられます。</p>';
+      return;
+    }
+    box.innerHTML = (msg ? `<p class="ts-ok">${esc(msg)}</p>` : '') +
+      `<h3>公開した相手に知らせる</h3>
+      <p class="muted small">公開中：${to.map(x => esc(pubName(x))).join('、')}。リンクは会員限定で、公開した相手がログインしたときだけ見られます。</p>
+      ${sendButtons(themeMessage(t), themeUrl(t))}`;
   }
   $('#ts-quick').addEventListener('click', e => {
     const b = e.target.closest('[data-pick]');
@@ -1385,12 +1411,105 @@
     try {
       const r = await api('setThemeShare', { themeId: t.themeId, emails });
       S.shares = r.shares;
-      $('#dlg-theme-share').close();
+      TS_DIRTY = false;
       replaceNote(t); renderShares();
+      openThemeShare(t, true);
       const n = sharedTo(t).length;
-      toast(n ? `「${t.title}」を ${n}人に公開しています。` : `「${t.title}」は、だれにも公開していません。`);
+      renderThemeSend(n ? `保存しました。「${t.title}」を ${n}人に公開しています。` : '');
+      if (!n) toast(`「${t.title}」は非公開にしました。`);
     } catch (err) { toast(err.message, 'error'); }
   });
+
+  /* ============================================================
+   * LINE・メールなどで知らせる（共有リンク）
+   * ============================================================ */
+  const appBase = () => location.href.split(/[?#]/)[0].replace(/index\.html$/, '');
+  const themeUrl = t => `${appBase()}?fusen=${encodeURIComponent(t.themeId)}`;
+  const boardUrl = () => `${appBase()}?b=${encodeURIComponent((S.user && S.user.boardKey) || '')}`;
+  const myName = () => (S.user && S.user.nickname) || '';
+  function themeMessage(t) {
+    return `${myName()}さんから、思い出の付箋「${t.title}」が届きました📷\n` +
+      `「おもいで付箋ボード」で見られます（会員限定・ログインが必要です）。\n`;
+  }
+  function boardMessage(s) {
+    const n = s.allThemes ? '思い出の付箋' : `思い出の付箋（${s.themeIds.length}件）`;
+    return `${myName()}さんが、${s.nickname ? s.nickname + 'さんに' : 'あなたに'}${n}を公開しました📷\n` +
+      `「おもいで付箋ボード」にログインして見てください（会員限定）。\n` +
+      (s.registered ? '' : `※ はじめての方は、このメールアドレス（${s.email}）で会員登録してください。\n`);
+  }
+  /** 送るボタン一式。LINE・メールは <a> にして、スマホでもポップアップがブロックされないようにする */
+  function sendButtons(text, url, size = '') {
+    const full = text + url;
+    const line = 'https://line.me/R/share?text=' + encodeURIComponent(full);
+    const mail = 'mailto:?subject=' + encodeURIComponent('【おもいで付箋ボード】' + myName() + 'さんから思い出の付箋が届きました') + '&body=' + encodeURIComponent(full);
+    const sz = size ? ' ' + size : '';
+    return `<div class="send-btns">
+      <a class="btn line${sz}" href="${esc(line)}" target="_blank" rel="noopener">LINEで送る</a>
+      <a class="btn${sz}" href="${esc(mail)}">メールで送る</a>
+      <button type="button" class="btn${sz}" data-send-copy data-url="${esc(url)}" data-text="${esc(full)}">リンクをコピー</button>
+      ${navigator.share ? `<button type="button" class="btn${sz}" data-send-native data-url="${esc(url)}" data-text="${esc(text)}">ほかのアプリ</button>` : ''}
+    </div>`;
+  }
+  async function copyText(s) {
+    try { await navigator.clipboard.writeText(s); return true; }
+    catch (_) {
+      const ta = document.createElement('textarea');
+      ta.value = s; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      (document.querySelector('dialog[open]') || document.body).appendChild(ta);
+      ta.select();
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch (_) { /* noop */ }
+      ta.remove();
+      return ok;
+    }
+  }
+  document.addEventListener('click', async e => {
+    const c = e.target.closest('[data-send-copy]');
+    if (c) {
+      const ok = await copyText(c.dataset.text);
+      const old = c.textContent;
+      c.textContent = ok ? 'コピーしました' : 'コピーできません';
+      setTimeout(() => { c.textContent = old; }, 1800);
+      return;
+    }
+    const n = e.target.closest('[data-send-native]');
+    if (n) {
+      try { await navigator.share({ title: 'おもいで付箋ボード', text: n.dataset.text, url: n.dataset.url }); }
+      catch (_) { /* キャンセル */ }
+    }
+  });
+
+  /* 共有リンク（?fusen=付箋ID / ?b=ボード）で開いたとき：ログイン後にその付箋を開く */
+  const LINK_KEY = 'omoide.link';
+  function receiveLink() {
+    const q = new URLSearchParams(location.search);
+    const fusen = (q.get('fusen') || '').trim(), board = (q.get('b') || '').trim();
+    if (!fusen && !board) return;
+    sessionStorage.setItem(LINK_KEY, JSON.stringify({ fusen, board }));
+    history.replaceState(null, '', location.pathname);
+  }
+  const pendingLink = () => parseJson(sessionStorage.getItem(LINK_KEY));
+  async function openPendingLink() {
+    const L = pendingLink();
+    if (!L) return;
+    sessionStorage.removeItem(LINK_KEY);
+    try {
+      const r = await api('openLink', L);
+      if (r.self) {
+        if (S.viewing) await switchBoard('');
+      } else {
+        const o = r.owner;
+        if (!(S.shares.sharedWithMe || []).some(x => x.email === o.email)) {
+          S.shares.sharedWithMe = (S.shares.sharedWithMe || []).concat([o]);
+          renderBoardSwitch();
+        }
+        if (!S.viewing || S.viewing.email !== o.email) await switchBoard(o.email);
+      }
+      const t = r.themeId && theme(r.themeId);
+      if (t) openViewer(t);
+      else if (!r.self) toast(`${r.owner.nickname} さんが公開した付箋を表示しています。`);
+    } catch (err) { toast(err.message, 'error'); }
+  }
 
   /* ============================================================
    * 写真ライブラリ
@@ -3180,6 +3299,8 @@
    * ============================================================ */
   $$('.ver').forEach(el => { el.textContent = VERSION; });
   receiveShare();
+  receiveLink();
+  $('#link-note').hidden = !pendingLink();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   document.title = CFG.APP_NAME || document.title;
   if (S.token && S.user) {

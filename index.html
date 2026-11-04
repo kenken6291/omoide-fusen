@@ -13,7 +13,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E%F0%9F%93%8C%3C/text%3E%3C/svg%3E">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-<link rel="stylesheet" href="style.css?v=1.8.0">
+<link rel="stylesheet" href="style.css?v=1.8.1">
 </head>
 <body>
 
@@ -26,6 +26,7 @@
 
   <section class="sticky auth-card" data-panel="login" hidden>
     <h2>ログイン</h2>
+    <p id="link-note" class="note-text link-note" hidden>共有された思い出の付箋を見るには、ログインしてください。はじめての方は、公開した方に伝えたメールアドレスで新規登録してください。</p>
     <form data-form="login" novalidate>
       <label class="field"><span>メールアドレス</span>
         <input type="email" name="email" autocomplete="email" required></label>
@@ -217,6 +218,7 @@
   <button role="menuitem" data-act="organize">写真を整理する（外す・表紙）</button>
   <button role="menuitem" data-act="edit">名前と色を変える</button>
   <button role="menuitem" data-act="share">公開する相手を選ぶ</button>
+  <button role="menuitem" data-act="send">LINEなどで知らせる</button>
   <button role="menuitem" data-act="refresh">写真を探し直す</button>
   <button role="menuitem" data-act="narration">ナレーションを作り直す</button>
   <button role="menuitem" data-act="earth">撮影地と映像</button>
@@ -543,7 +545,7 @@
 <dialog id="dlg-publish" class="dlg wide">
   <form>
     <h2>公開の管理</h2>
-    <p class="muted small">付箋は、ここで指定した会員にだけ公開されます（閲覧のみ。編集・コメント・写真ライブラリは見られません）。「停止中」にすると、設定を残したまま相手から見えなくなります。</p>
+    <p class="muted small">付箋は<strong>最初はすべて非公開</strong>です。ここで指定した会員に、選んだ付箋だけが公開されます（閲覧のみ。編集・コメント・写真ライブラリは見られません）。「停止中」にすると、設定を残したまま相手から見えなくなります。</p>
 
     <details class="pub-add" id="pub-add">
       <summary>＋ 公開する相手を追加する</summary>
@@ -594,11 +596,12 @@
       <button type="button" data-pick="">だれにも公開しない</button>
     </div>
     <ul id="ts-list" class="ts-list"></ul>
-    <p class="muted small">停止中の相手は、チェックを入れても再開するまで見えません。「すべての付箋」の相手は、公開の管理で変更できます。</p>
+    <p class="muted small">停止中の相手にチェックを入れて保存すると、公開中に切り替わります。「すべての付箋」の相手は、公開の管理で変更できます。</p>
+    <section id="ts-send" class="ts-send" aria-live="polite"></section>
     <div class="dlg-actions">
       <button type="button" class="link" id="ts-manage">公開の管理を開く</button>
       <span class="spacer"></span>
-      <button type="button" class="btn" data-close>やめる</button>
+      <button type="button" class="btn" data-close>閉じる</button>
       <button type="submit" class="btn primary">保存する</button>
     </div>
   </form>
@@ -626,7 +629,7 @@
 <div id="busy" class="busy" hidden><div class="busy-card"><span class="spinner" aria-hidden="true"></span><p id="busy-msg"></p></div></div>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
-<script src="config.js?v=1.8.0"></script>
-<script src="app.js?v=1.8.0"></script>
+<script src="config.js?v=1.8.1"></script>
+<script src="app.js?v=1.8.1"></script>
 </body>
 </html>

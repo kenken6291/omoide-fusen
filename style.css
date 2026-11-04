@@ -711,3 +711,17 @@ body.readonly .note { cursor: pointer; }
 }
 #ts-quick { margin: 8px 0 10px; }
 .pub-opts select { padding-right: 2em; }
+
+/* ---------- v1.8.1 追加：既定非公開・LINEなどで知らせる ---------- */
+.send-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.btn.line { background: #06C755; border-color: #06C755; color: #fff; }
+.btn.line:hover { background: #05A648; border-color: #05A648; }
+.ts-send { border-top: 1px solid #E3E7EC; margin-top: 10px; padding-top: 10px; }
+.ts-send:empty { display: none; }
+.ts-send h3 { margin: 0 0 4px; font-size: .95rem; }
+.ts-ok { margin: 0 0 8px; font-weight: 700; color: #1E7A47; }
+.pub-send { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 10px; padding-top: 8px; border-top: 1px dashed #DCE2E9; }
+.pub-send .send-btns { margin-top: 0; }
+.link-note { background: #fff; border-radius: 8px; padding: 10px 12px; font-weight: 700; }
+.send-btns a.btn { color: var(--ink); }
+.send-btns a.btn.line { color: #fff; }
