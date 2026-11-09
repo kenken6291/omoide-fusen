@@ -2838,8 +2838,30 @@
       });
     }, { root: grid, rootMargin: '300px' });
     $$('.vg-item', grid).forEach(el => pickObs.observe(el));
-    $('#pick-count').textContent = `${list.length}枚から選べます　${PICK.sel.size}枚を選択中`;
+    PICK.visible = list.map(p => p.fileId);
+    updatePickCount();
   }
+  /* 件数表示と「表示中をすべて選ぶ」チェックの状態をそろえる */
+  function updatePickCount() {
+    const vis = PICK.visible || [];
+    const on = vis.filter(id => PICK.sel.has(id)).length;
+    const cb = $('#pick-all');
+    cb.checked = vis.length > 0 && on === vis.length;
+    cb.indeterminate = on > 0 && on < vis.length;
+    cb.disabled = !vis.length;
+    $('#pick-count').textContent = `${vis.length}枚から選べます　${PICK.sel.size}枚を選択中`;
+  }
+  $('#pick-all').addEventListener('change', e => {
+    if (!PICK) return;
+    const all = e.target.checked;
+    (PICK.visible || []).forEach(id => all ? PICK.sel.add(id) : PICK.sel.delete(id));
+    $$('#pick-grid .vg-item').forEach(el => {
+      const on = PICK.sel.has(el.dataset.file);
+      el.classList.toggle('sel', on);
+      el.setAttribute('aria-checked', String(on));
+    });
+    updatePickCount();
+  });
   let pickTimer;
   $('#pick-q').addEventListener('input', () => { clearTimeout(pickTimer); pickTimer = setTimeout(renderPick, 200); });
   $('#pick-filter').addEventListener('change', renderPick);
@@ -2849,7 +2871,7 @@
     const on = PICK.sel.has(id);
     el.classList.toggle('sel', on);
     el.setAttribute('aria-checked', String(on));
-    $('#pick-count').textContent = $('#pick-count').textContent.replace(/\d+枚を選択中/, `${PICK.sel.size}枚を選択中`);
+    updatePickCount();
   }
   $('#pick-grid').addEventListener('click', e => { const el = e.target.closest('.vg-item'); if (el) pickToggle(el); });
   $('#pick-grid').addEventListener('keydown', e => {
