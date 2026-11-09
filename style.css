@@ -574,6 +574,10 @@ body.readonly .note { cursor: pointer; }
 .pick-tools { margin-bottom: 6px; flex-wrap: wrap; }
 .pick-tools input { flex: 1 1 200px; }
 .pick-tools select { width: auto; }
+.pick-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 16px; margin: 2px 0 8px; }
+.pick-bar .check-row { margin: 0; font-weight: 600; }
+.pick-bar .check-row input { width: 22px; height: 22px; flex: none; margin: 0; }
+.pick-bar #pick-count { margin: 0; }
 .vg-empty { color: #C9D2DD; padding: 30px 0; text-align: center; }
 .vg-item { position: relative; cursor: pointer; border-radius: 8px; outline: none; }
 .vg-item .im { display: block; aspect-ratio: 1; background: #3A4553; border-radius: 8px; overflow: hidden; }
