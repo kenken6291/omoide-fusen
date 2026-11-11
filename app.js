@@ -7,7 +7,7 @@
    * ============================================================ */
   const CFG = window.APP_CONFIG || {};
   const VERSION = CFG.VERSION || '0.0.0';
-  const KEY = { gas: 'omoide.gasUrl', token: 'omoide.token', user: 'omoide.user', view: 'omoide.view', voice: 'omoide.voice' };
+  const KEY = { gas: 'omoide.gasUrl', token: 'omoide.token', user: 'omoide.user', view: 'omoide.view', voice: 'omoide.voice', aiNar: 'omoide.aiNarration' };
   const COLORS = [
     { v: '#FFEF7A', n: 'きいろ' }, { v: '#FFB8D2', n: 'ピンク' }, { v: '#A9E3F2', n: 'みずいろ' },
     { v: '#CBEB98', n: 'きみどり' }, { v: '#FFC98A', n: 'オレンジ' },
@@ -206,6 +206,9 @@
     let r, text, res;
     const ac = opts.timeoutMs && window.AbortController ? new AbortController() : null;
     const timer = ac ? setTimeout(() => ac.abort(), opts.timeoutMs) : null;
+    let cancelled = false;
+    const onCancel = () => { cancelled = true; if (ac) ac.abort(); };
+    if (opts.signal) { if (opts.signal.aborted) onCancel(); else opts.signal.addEventListener('abort', onCancel, { once: true }); }
     try {
       r = await fetch(url, {
         method: 'POST',
@@ -215,11 +218,13 @@
       });
       text = await r.text();
     } catch (_) {
+      if (cancelled) { const e = new Error('中止しました。'); e.cancelled = true; throw e; }
       if (ac && ac.signal.aborted) throw new Error(`サーバーの応答が${Math.round(opts.timeoutMs / 1000)}秒以内に返りませんでした。`);
       if (!navigator.onLine) throw new Error('インターネットにつながっていません。通信状態を確認してください。');
       throw new Error(`サーバーに接続できません（接続先：${urlLabel(url)}）。設定画面の「接続を確かめる」で原因を調べられます。`);
     } finally {
       if (timer) clearTimeout(timer);
+      if (opts.signal) opts.signal.removeEventListener('abort', onCancel);
     }
     try { res = JSON.parse(text); }
     catch (_) {
@@ -474,7 +479,7 @@
     });
   }
   /* 画面とGASのバージョンが合っていないときに一度だけ知らせる */
-  const MIN_SERVER = '1.8.1';
+  const MIN_SERVER = '1.8.4';
   let versionWarned = false;
   function cmpVer(a, b) {
     const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number);
@@ -763,9 +768,9 @@
     if (act === 'narration') {
       busy('ナレーションを書いています…');
       try {
-        const r = await api('generateNarration', { themeId: t.themeId });
+        const r = await api('generateNarration', { themeId: t.themeId, force: true }, { timeoutMs: 180000 });
         t.narration = r.narration;
-        toast('ナレーションを作り直しました。走馬灯で流れます。');
+        toast('ナレーションを作り直して保存しました。次回からこの文章で流れます。');
       } catch (err) { toast(err.message, 'error'); } finally { busy(false); }
     }
   });
@@ -3080,6 +3085,16 @@
     return ttsCache.get(k);
   }
 
+  /* 保存済みのナレーションで足りるか（足りなければサーバーで書き足す） */
+  function narrationNeedsUpdate(t) {
+    const n = t.narration;
+    if (!n || !Array.isArray(n.lines) || !n.lines.length || !n.intro || !n.outro) return true;
+    const inTheme = new Set(V.list.map(p => p.fileId));
+    const ok = n.lines.filter(l => l && inTheme.has(l.fileId) && String(l.text || '').trim());
+    if (ok.length < n.lines.length) return true;                  // 外した写真・文章が空の写真がある
+    return ok.length < Math.min(24, V.list.length);               // 追加した写真の枠が残っている
+  }
+
   /* AIのナレーションが用意できないときの代わり（写真の説明・撮影日・撮影地から作る） */
   function simpleNarration(t, list) {
     const lineOf = p => {
@@ -3109,12 +3124,15 @@
         <h3>${esc(t.title)}</h3>
         <p>${V.list.length}枚の写真を、撮った順にゆっくり振り返ります。</p>
         <label class="check"><input type="checkbox" id="c-voice" checked> ナレーション音声を流す</label>
+        ${S.readOnly ? '' : `<label class="check"><input type="checkbox" id="c-ai"${localStorage.getItem(KEY.aiNar) === 'off' ? '' : ' checked'}> まだない分のナレーションをAIで作る</label>`}
         <button class="btn primary big" id="c-play">再生する</button>
       </div>`;
     const layers = $('.c-layers', stage);
     const startBox = $('.c-start', stage);
     const STOP = {};
     let paused = false, voiceOn = true, running = false, warned = false, started = false;
+    let aiOn = localStorage.getItem(KEY.aiNar) !== 'off';
+    let narAbort = null;
     const player = new Audio();
     player.preload = 'auto';
     const alive = () => sess === V.session;
@@ -3134,11 +3152,16 @@
       if (!voiceOn) player.pause();
     });
     const restartBtn = ctrlBtn('最初から', () => setMode('cinema'));
+    const stopNarBtn = ctrlBtn('ナレーション作成を止める', () => {
+      if (narAbort) narAbort.abort();
+    });
+    stopNarBtn.hidden = true;
     pauseBtn.disabled = true;
     restartBtn.disabled = true;
-    controls.append(pauseBtn, voiceBtn, restartBtn);
+    controls.append(stopNarBtn, pauseBtn, voiceBtn, restartBtn);
     V.keys = e => { if (e.key === ' ') { e.preventDefault(); pauseBtn.click(); } };
     V.cleanup = () => {
+      if (narAbort) narAbort.abort();
       player.pause(); player.removeAttribute('src');
       $$('.c-layer', stage).forEach(l => { if (l._map) l._map.remove(); });
     };
@@ -3283,39 +3306,77 @@
       startBox.hidden = true;
       pauseBtn.disabled = false;
       restartBtn.disabled = false;
-      if (!S.readOnly && (!t.narration || !Array.isArray(t.narration.lines) || !t.narration.lines.length)) {
+      /* AIナレーションは裏で作る。最大15秒だけ待ち、間に合わなければ
+         写真の情報から作った文章で再生を始め、できた時点で次の写真から切り替える */
+      let pending = null, aiDone = false;
+      if (!S.readOnly && aiOn && narrationNeedsUpdate(t)) {
         const t0 = Date.now();
+        narAbort = window.AbortController ? new AbortController() : null;
+        stopNarBtn.hidden = !narAbort;
+        let waitDone;
+        const skipWait = new Promise(res => { waitDone = res; });
+        if (narAbort) narAbort.signal.addEventListener('abort', () => waitDone(), { once: true });
         const tx = $('.c-text', stage);
         $('.c-meta', stage).textContent = '';
-        tx.textContent = 'ナレーションを用意しています…';
+        const label = t.narration && Array.isArray(t.narration.lines) && t.narration.lines.length
+          ? '新しい写真のナレーションを書き足しています…' : 'ナレーションを用意しています…';
+        tx.textContent = label;
         const tick = setInterval(() => {
           if (!alive()) return clearInterval(tick);
-          tx.textContent = `ナレーションを用意しています…（${Math.round((Date.now() - t0) / 1000)}秒）`;
+          tx.textContent = `${label}（${Math.round((Date.now() - t0) / 1000)}秒）`;
         }, 1000);
-        try {
-          const r = await api('generateNarration', { themeId: t.themeId }, { timeoutMs: 120000 });
-          if (r.narration && Array.isArray(r.narration.lines) && r.narration.lines.length) t.narration = r.narration;
-        } catch (err) {
-          console.warn('[走馬灯] ナレーション生成失敗:', err);
-          toast('AIのナレーションを作れませんでした（' + err.message + '）。写真の情報から作った文章で読み上げます。', 'warn');
-        } finally {
-          clearInterval(tick);
-        }
+        pending = api('generateNarration', { themeId: t.themeId }, { timeoutMs: 330000, signal: narAbort ? narAbort.signal : undefined })
+          .then(r => {
+            aiDone = true;
+            if (r.narration && Array.isArray(r.narration.lines) && r.narration.lines.length) {
+              t.narration = r.narration;
+              return r;
+            }
+            return null;
+          });
+        pending.catch(() => { aiDone = true; });
+        pending.catch(() => null).then(() => { stopNarBtn.hidden = true; narAbort = null; });
+        await Promise.race([pending.catch(() => null), sleep(15000), skipWait]);
+        clearInterval(tick);
         if (!alive()) return;
       }
-      const nar = t.narration && Array.isArray(t.narration.lines) && t.narration.lines.length
-        ? t.narration
-        : simpleNarration(t, sampleEven(chrono(V.list), 24));
-      const lineMap = new Map((nar ? nar.lines : []).map(l => [l.fileId, l.text]));
-      const photos = nar
-        ? chrono(nar.lines.map(l => photo(l.fileId)).filter(p => S.photoMap.has(p.fileId)))
+
+      const inTheme = new Set(V.list.map(p => p.fileId));
+      const savedLines = t.narration && Array.isArray(t.narration.lines)
+        ? t.narration.lines.filter(l => inTheme.has(l.fileId) && S.photoMap.has(l.fileId)) : [];
+      const photos = savedLines.length >= Math.min(24, V.list.length)
+        ? chrono(savedLines.map(l => photo(l.fileId)))
         : sampleEven(chrono(V.list), 24);
+      const simple = simpleNarration(t, photos);
+      const nar = {
+        intro: (t.narration && t.narration.intro) || simple.intro,
+        outro: (t.narration && t.narration.outro) || simple.outro,
+      };
+      const lineMap = new Map(simple.lines.map(l => [l.fileId, l.text]));
+      savedLines.forEach(l => { if (String(l.text || '').trim()) lineMap.set(l.fileId, l.text); });
+
+      if (pending && !aiDone && narAbort && !narAbort.signal.aborted) {
+        toast('AIのナレーションを裏で作っています。できしだい、次の写真から切り替わります。止めるときは「ナレーション作成を止める」を押してください。');
+      }
+      if (pending) {
+        pending.then(r => {
+          if (!alive() || !r) return;
+          r.narration.lines.forEach(l => { if (String(l.text || '').trim() && lineMap.has(l.fileId)) lineMap.set(l.fileId, l.text); });
+          if (r.narration.outro) nar.outro = r.narration.outro;
+          toast(r.added ? `ナレーション${r.added}枚分をAIで作って保存しました。` : 'AIのナレーションに切り替えました。');
+        }).catch(err => {
+          if (!alive()) return;
+          if (err && err.cancelled) { toast('ナレーションの作成を止めました。写真の情報から作った文章で続けます。'); return; }
+          console.warn('[走馬灯] ナレーション生成失敗:', err);
+          toast('AIのナレーションを作れませんでした（' + err.message + '）。写真の情報から作った文章で続けます。', 'warn');
+        });
+      }
 
       const dates = photos.map(p => p.takenAt).filter(Boolean).sort();
       const span = dates.length ? [fmtDate(dates[0]), fmtDate(dates[dates.length - 1])].filter((v, i, a) => a.indexOf(v) === i).join(' 〜 ') : '';
 
       try {
-        await titleSeg(t.title, span, nar ? nar.intro : '');
+        await titleSeg(t.title, span, nar.intro);
         if (t.earthVideoUrl) await earthSeg(t.earthVideoUrl);
         let last = null;
         for (let i = 0; i < photos.length; i++) {
@@ -3325,10 +3386,10 @@
             last = p;
           }
           const text = lineMap.get(p.fileId) || '';
-          const next = photos[i + 1] ? lineMap.get(photos[i + 1].fileId) : (nar ? nar.outro : '');
+          const next = photos[i + 1] ? lineMap.get(photos[i + 1].fileId) : nar.outro;
           await photoSeg(p, text, next);
         }
-        await titleSeg('おわり', t.title, nar ? nar.outro : '');
+        await titleSeg('おわり', t.title, nar.outro);
         setSub('', '');
         startBox.querySelector('h3').textContent = t.title;
         startBox.querySelector('p').textContent = '最後まで再生しました。';
@@ -3344,6 +3405,8 @@
     $('#c-play', stage).addEventListener('click', () => {
       if (started && running) return;
       voiceOn = $('#c-voice', stage).checked;
+      const aiBox = $('#c-ai', stage);
+      if (aiBox) { aiOn = aiBox.checked; localStorage.setItem(KEY.aiNar, aiOn ? 'on' : 'off'); }
       voiceBtn.textContent = voiceOn ? '音声 オン' : '音声 オフ';
       // iOS 等の自動再生制限を解除するため、クリック内で無音を一度鳴らす
       player.src = URL.createObjectURL(pcmToWav(new Uint8Array(4800), 24000));
