@@ -192,7 +192,7 @@
   /* ============================================================
    * API
    * ============================================================ */
-  async function api(action, data = {}) {
+  async function api(action, data = {}, opts = {}) {
     const url = gasUrl();
     if (!url || url.includes('XXXX')) {
       openSettings();
@@ -204,16 +204,22 @@
       else if (!ACCOUNT_ACTIONS.has(action)) throw new Error('閲覧のみのボードでは、この操作はできません。');
     }
     let r, text, res;
+    const ac = opts.timeoutMs && window.AbortController ? new AbortController() : null;
+    const timer = ac ? setTimeout(() => ac.abort(), opts.timeoutMs) : null;
     try {
       r = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify(body),
+        signal: ac ? ac.signal : undefined,
       });
       text = await r.text();
     } catch (_) {
+      if (ac && ac.signal.aborted) throw new Error(`サーバーの応答が${Math.round(opts.timeoutMs / 1000)}秒以内に返りませんでした。`);
       if (!navigator.onLine) throw new Error('インターネットにつながっていません。通信状態を確認してください。');
       throw new Error(`サーバーに接続できません（接続先：${urlLabel(url)}）。設定画面の「接続を確かめる」で原因を調べられます。`);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
     try { res = JSON.parse(text); }
     catch (_) {
@@ -3067,11 +3073,30 @@
   function ttsUrl(text) {
     const k = voice() + '|' + text;
     if (!ttsCache.has(k)) {
-      const p = api('tts', { text, voice: voice() }).then(r => URL.createObjectURL(audioBlob(r.audio, r.mimeType)));
+      const p = api('tts', { text, voice: voice() }, { timeoutMs: 90000 }).then(r => URL.createObjectURL(audioBlob(r.audio, r.mimeType)));
       p.catch(() => ttsCache.delete(k));
       ttsCache.set(k, p);
     }
     return ttsCache.get(k);
+  }
+
+  /* AIのナレーションが用意できないときの代わり（写真の説明・撮影日・撮影地から作る） */
+  function simpleNarration(t, list) {
+    const lineOf = p => {
+      const d = String(p.description || '').trim();
+      if (d) return d.slice(0, 120);
+      const when = p.takenAt ? fmtDate(p.takenAt) : '';
+      const where = String(p.place || '').replace('（推定）', '');
+      if (when && where) return `${when}、${where}での一枚です。`;
+      if (where) return `${where}での一枚です。`;
+      if (when) return `${when}の一枚です。`;
+      return '';
+    };
+    return {
+      intro: `「${t.title}」の思い出を、撮った順に振り返ります。`,
+      lines: list.map(p => ({ fileId: p.fileId, text: lineOf(p) })),
+      outro: `「${t.title}」の思い出でした。`,
+    };
   }
 
   function startCinema(sess) {
@@ -3155,7 +3180,8 @@
         return isFinite(player.duration) ? player.duration : 0;
       } catch (e) {
         if (e === STOP) throw e;
-        if (!warned) { warned = true; toast('ナレーション音声を作れませんでした。字幕だけで続けます。', 'warn'); }
+        console.warn('[走馬灯] TTS失敗:', e);
+        if (!warned) { warned = true; toast('ナレーション音声を作れませんでした（' + (e && e.message ? e.message : '原因不明') + '）。字幕だけで続けます。', 'warn'); }
         return 0;
       }
     }
@@ -3257,17 +3283,29 @@
       startBox.hidden = true;
       pauseBtn.disabled = false;
       restartBtn.disabled = false;
-      if (!S.readOnly && (!t.narration || !Array.isArray(t.narration.lines))) {
-        setSub('', 'ナレーションを用意しています…');
+      if (!S.readOnly && (!t.narration || !Array.isArray(t.narration.lines) || !t.narration.lines.length)) {
+        const t0 = Date.now();
+        const tx = $('.c-text', stage);
+        $('.c-meta', stage).textContent = '';
+        tx.textContent = 'ナレーションを用意しています…';
+        const tick = setInterval(() => {
+          if (!alive()) return clearInterval(tick);
+          tx.textContent = `ナレーションを用意しています…（${Math.round((Date.now() - t0) / 1000)}秒）`;
+        }, 1000);
         try {
-          const r = await api('generateNarration', { themeId: t.themeId });
-          t.narration = r.narration;
+          const r = await api('generateNarration', { themeId: t.themeId }, { timeoutMs: 120000 });
+          if (r.narration && Array.isArray(r.narration.lines) && r.narration.lines.length) t.narration = r.narration;
         } catch (err) {
-          toast('ナレーションを作れませんでした: ' + err.message, 'warn');
+          console.warn('[走馬灯] ナレーション生成失敗:', err);
+          toast('AIのナレーションを作れませんでした（' + err.message + '）。写真の情報から作った文章で読み上げます。', 'warn');
+        } finally {
+          clearInterval(tick);
         }
         if (!alive()) return;
       }
-      const nar = t.narration && Array.isArray(t.narration.lines) ? t.narration : null;
+      const nar = t.narration && Array.isArray(t.narration.lines) && t.narration.lines.length
+        ? t.narration
+        : simpleNarration(t, sampleEven(chrono(V.list), 24));
       const lineMap = new Map((nar ? nar.lines : []).map(l => [l.fileId, l.text]));
       const photos = nar
         ? chrono(nar.lines.map(l => photo(l.fileId)).filter(p => S.photoMap.has(p.fileId)))

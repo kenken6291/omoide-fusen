@@ -1,11 +1,11 @@
 /**
  * おもいで付箋ボード (omoide-fusen) — Google Apps Script バックエンド
- * Version 1.8.1
+ * Version 1.8.2
  *
  * ── スクリプトプロパティ ──────────────────────────────
  *   GEMINI_API_KEY          (必須) Google AI Studio の API キー
- *   GEMINI_MODEL            (任意) 既定: gemini-2.5-flash
- *   TTS_MODEL               (任意) 既定: gemini-2.5-flash-preview-tts
+ *   GEMINI_MODEL            (任意) 既定: gemini-3.5-flash（使えなければ順に代替モデルを試す）
+ *   TTS_MODEL               (任意) 既定: gemini-3.8-flash-tts（使えなければ順に代替モデルを試す）
  *   TTS_VOICE               (任意) 既定: Kore
  *   GOOGLE_MAPS_SERVER_KEY  (任意) Geocoding API 用サーバーキー。未設定なら GAS 組み込み Maps
  *   APP_URL                 (任意) GitHub Pages の URL（メール本文に記載）
@@ -26,7 +26,7 @@
  *   ※ コードを変更したら「デプロイを管理 > 編集 > 新バージョン」で再デプロイ
  */
 
-const APP_VERSION = '1.8.1';
+const APP_VERSION = '1.8.2';
 
 const DEF = {
   users:    { name: 'Users',    cols: ['email', 'nickname', 'passwordHash', 'salt', 'isFirstLogin', 'failCount', 'lockedUntil', 'folderId', 'homeFolderId', 'createdAt', 'lastLoginAt'] },
@@ -1627,14 +1627,18 @@ function tts_(req, u, ctx) {
   const text = String(req.text || '').trim().slice(0, 800);
   if (!text) throw err_('読み上げる文章がありません。');
   const voice = /^[A-Za-z]{2,20}$/.test(req.voice || '') ? req.voice : prop_('TTS_VOICE', 'Kore');
-  const model = prop_('TTS_MODEL', 'gemini-2.5-flash-preview-tts');
-  const name = digest_(model + '|' + voice + '|' + text) + '.pcm';
+  const models = modelList_('TTS_MODEL', TTS_MODELS);
   const folder = ttsFolder_();
-  const it = folder.getFilesByName(name);
-  if (it.hasNext()) {
-    const f = it.next();
-    usageAdd_(MEMO.email, 'c');
-    return { audio: Utilities.base64Encode(f.getBlob().getBytes()), mimeType: f.getDescription() || 'audio/L16;codec=pcm;rate=24000', cached: true };
+  // キャッシュ：声と文章が同じなら、どのモデルで作った音声でも再利用
+  const name = digest_('tts|' + voice + '|' + text) + '.pcm';
+  const names = [name].concat(models.map(m => digest_(m + '|' + voice + '|' + text) + '.pcm'));
+  for (let i = 0; i < names.length; i++) {
+    const it = folder.getFilesByName(names[i]);
+    if (it.hasNext()) {
+      const f = it.next();
+      usageAdd_(MEMO.email, 'c');
+      return { audio: Utilities.base64Encode(f.getBlob().getBytes()), mimeType: f.getDescription() || 'audio/L16;codec=pcm;rate=24000', cached: true };
+    }
   }
   usageCheck_(MEMO.email, 1);
   const body = {
@@ -1644,10 +1648,10 @@ function tts_(req, u, ctx) {
       speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } },
     },
   };
-  const j = callGemini_(model, body);
+  const j = callGeminiAny_(models, body, 'TTS_MODEL_OK');
   const parts = (j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || [];
   const part = parts.find(p => p.inlineData);
-  if (!part) throw err_('音声を生成できませんでした。');
+  if (!part) throw err_('音声を生成できませんでした（AIの応答に音声がありません）。');
   usageAdd_(MEMO.email, 's');
   try {
     folder.createFile(Utilities.newBlob(Utilities.base64Decode(part.inlineData.data), 'application/octet-stream', name))
@@ -1815,6 +1819,39 @@ function callGemini_(model, body) {
   }
 }
 
+/* モデル候補（上から順に試す。終了したモデルは自動でとばす） */
+const TEXT_MODELS = ['gemini-3.5-flash', 'gemini-3.6-flash', 'gemini-2.5-flash', 'gemini-3.1-flash-lite'];
+const TTS_MODELS = ['gemini-3.8-flash-tts', 'gemini-3.8-flash-lite-tts', 'gemini-3.1-flash-tts-preview', 'gemini-2.5-flash-preview-tts'];
+
+/** 前回うまくいったモデル → スクリプトプロパティ → 既定候補 の順に並べる */
+function modelList_(propKey, defaults) {
+  const ok = prop_(propKey + '_OK', '');
+  const set = prop_(propKey, '');
+  const list = [];
+  [ok, set].concat(defaults).forEach(m => { if (m && list.indexOf(m) < 0) list.push(m); });
+  return list;
+}
+
+/** モデルが終了・未提供（404 / 403 / モデル名エラー）のときだけ次の候補を試す */
+function callGeminiAny_(models, body, okKey) {
+  let last = null;
+  for (let i = 0; i < models.length; i++) {
+    try {
+      const j = callGemini_(models[i], body);
+      if (prop_(okKey, '') !== models[i]) PropertiesService.getScriptProperties().setProperty(okKey, models[i]);
+      return j;
+    } catch (e) {
+      last = e;
+      const m = String(e.message || '');
+      const gone = e.code === 'GEMINI_404' || e.code === 'GEMINI_403' ||
+        (e.code === 'GEMINI_400' && !/thinking|media_?resolution/i.test(m) && /model|not (found|supported)|deprecat|no longer/i.test(m));
+      if (!gone) throw e;
+      console.warn('Gemini モデル ' + models[i] + ' は使えません: ' + m);
+    }
+  }
+  throw last || err_('使えるGeminiモデルが見つかりませんでした。');
+}
+
 /** 節約設定（思考トークン0・画像低解像度）を付けて呼ぶ。モデルが未対応なら外して再試行 */
 function geminiText_(parts, json) {
   const imgs = parts.filter(p => p.inlineData).length;
@@ -1826,15 +1863,15 @@ function geminiText_(parts, json) {
   const mr = prop_('ANALYZE_MEDIA_RES', 'MEDIA_RESOLUTION_LOW');
   if (imgs && mr !== 'off') gc.mediaResolution = mr;
   const body = { contents: [{ role: 'user', parts }], generationConfig: gc };
-  const model = prop_('GEMINI_MODEL', 'gemini-2.5-flash');
+  const models = modelList_('GEMINI_MODEL', TEXT_MODELS);
   let j;
   try {
-    j = callGemini_(model, body);
+    j = callGeminiAny_(models, body, 'GEMINI_MODEL_OK');
   } catch (e) {
     if (e.code !== 'GEMINI_400' || (!gc.thinkingConfig && !gc.mediaResolution)) throw e;
     delete gc.thinkingConfig;
     delete gc.mediaResolution;
-    j = callGemini_(model, body);
+    j = callGeminiAny_(models, body, 'GEMINI_MODEL_OK');
   }
   usageAdd_(MEMO.email, imgs ? 'i' : 't', imgs || 1);
   const c = j.candidates && j.candidates[0];
@@ -2014,4 +2051,30 @@ function sendMail_(to, subject, body) {
 function appUrlLine_() {
   const u = prop_('APP_URL', '');
   return u ? '\nアプリ: ' + u + '\n' : '';
+}
+
+
+/* ================================================================
+ * 動作確認（GASエディタで実行 → 実行ログを見る）
+ * ================================================================ */
+function testTts() {
+  const body = {
+    contents: [{ parts: [{ text: 'こんにちは。ナレーションのテストです。' }] }],
+    generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } } },
+  };
+  const models = modelList_('TTS_MODEL', TTS_MODELS);
+  models.forEach(m => {
+    try {
+      const j = callGemini_(m, body);
+      const p = ((j.candidates || [])[0] || {}).content;
+      const ok = p && (p.parts || []).some(x => x.inlineData);
+      console.log(m + ' : ' + (ok ? 'OK（音声あり）' : '応答に音声なし'));
+    } catch (e) { console.log(m + ' : NG ' + e.message); }
+  });
+}
+function testText() {
+  const body = { contents: [{ role: 'user', parts: [{ text: '「テスト」とだけ返してください。' }] }] };
+  modelList_('GEMINI_MODEL', TEXT_MODELS).forEach(m => {
+    try { callGemini_(m, body); console.log(m + ' : OK'); } catch (e) { console.log(m + ' : NG ' + e.message); }
+  });
 }
